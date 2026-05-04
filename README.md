@@ -1,5 +1,7 @@
 # ciallo
 
+[简体中文](README.zh-CN.md)
+
 `ciallo` is a Minecraft Java Edition reverse proxy. The name blends Italian `ciao` and English `hello`. It listens on one public TCP port, reads the initial handshake `Server Address`, routes the connection to a configured local backend, and then stays transparent for login and game traffic.
 
 The proxy deliberately parses only the initial plaintext handshake. Online-mode encryption, compression, login state, and game packets remain owned by the backend server.
@@ -104,7 +106,7 @@ CI runs formatting, version checks, vet, and tests on pushes and pull requests. 
 - macOS amd64 and arm64.
 - Windows amd64 and arm64.
 
-Each release includes `mcproxy`, `README.md`, `LICENSE`, `configs/example.yaml`, and `SHA256SUMS`.
+Each release includes `mcproxy`, `README.md`, `README.zh-CN.md`, `LICENSE`, `configs/example.yaml`, and `SHA256SUMS`.
 
 ## Repository Hygiene
 

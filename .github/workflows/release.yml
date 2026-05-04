@@ -84,7 +84,7 @@ jobs:
             binary="mcproxy.exe"
           fi
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${name}/${binary}" ./cmd/mcproxy
-          cp README.md LICENSE configs/example.yaml "dist/${name}/"
+          cp README.md README.zh-CN.md LICENSE configs/example.yaml "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
 
       - name: Upload artifact
