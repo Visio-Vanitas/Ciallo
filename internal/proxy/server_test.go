@@ -95,6 +95,39 @@ func TestStatusCache(t *testing.T) {
 	}
 }
 
+func TestStatusAccessLogReportsCacheResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	backend := startStatusBackend(t, `{"version":{"name":"test","protocol":765},"players":{"max":20,"online":1},"description":{"text":"cached"}}`)
+	server, addr := startProxyWithLogger(t, ctx, []Route{
+		{Hosts: []string{"status.example.com"}, Backend: Backend{Name: "status", Addr: backend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), nil, Options{
+		HandshakeTimeout:   time.Second,
+		BackendDialTimeout: time.Second,
+		IdleTimeout:        time.Second,
+		MaxHandshakeSize:   64 * 1024,
+		StatusCacheEnabled: true,
+		StatusCacheTTL:     time.Minute,
+		MOTDCacheEnabled:   true,
+		MOTDFallbackTTL:    time.Minute,
+	}, logger)
+	defer server.Shutdown(context.Background())
+
+	_ = dialStatus(t, addr, "status.example.com", 10)
+	_ = dialStatus(t, addr, "status.example.com", 20)
+
+	text := logs.String()
+	if !strings.Contains(text, "event=status") || !strings.Contains(text, "cache_result=miss") || !strings.Contains(text, "cache_result=hit") {
+		t.Fatalf("status access log missing cache results:\n%s", text)
+	}
+	if !strings.Contains(text, "pong_handled=true") {
+		t.Fatalf("status access log missing pong_handled=true:\n%s", text)
+	}
+}
+
 func TestRouteCanDisableStatusCache(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -239,6 +272,41 @@ func TestFail2BanRecordsBackendReplayFailure(t *testing.T) {
 	waitForBan(t, guard, "replay.example.com", "player", "Alex")
 }
 
+func TestLoginAccessLogReportsFail2BanAction(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	backend := startEarlyCloseBackend(t)
+	guard := fail2ban.New(fail2ban.Options{
+		Enabled:         true,
+		MaxFailures:     1,
+		Window:          time.Minute,
+		BanDuration:     time.Minute,
+		EarlyDisconnect: time.Minute,
+	}, time.Now)
+	server, addr := startProxyWithLogger(t, ctx, []Route{
+		{Hosts: []string{"ban.example.com"}, Backend: Backend{Name: "ban", Addr: backend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), guard, Options{
+		HandshakeTimeout:   time.Second,
+		BackendDialTimeout: time.Second,
+		IdleTimeout:        time.Second,
+		MaxHandshakeSize:   64 * 1024,
+		StatusCacheEnabled: true,
+		StatusCacheTTL:     time.Second,
+	}, logger)
+	defer server.Shutdown(context.Background())
+
+	_ = dialLoginAllowEOF(t, addr, "ban.example.com", "Steve", []byte("payload"))
+	waitForBan(t, guard, "ban.example.com", "ip", "127.0.0.1")
+
+	text := logs.String()
+	if !strings.Contains(text, "event=login") || !strings.Contains(text, "username=Steve") || !strings.Contains(text, "fail2ban_action=record_failure") {
+		t.Fatalf("login access log missing fail2ban fields:\n%s", text)
+	}
+}
+
 func TestFail2BanIsRouteScopedByHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -287,13 +355,18 @@ func startProxy(t *testing.T, ctx context.Context, routes []Route, def *Backend)
 
 func startProxyWithOptions(t *testing.T, ctx context.Context, routes []Route, def *Backend, dialer Dialer, statusCache StatusCache, guard FailGuard, options Options) (*Server, string) {
 	t.Helper()
+	return startProxyWithLogger(t, ctx, routes, def, dialer, statusCache, guard, options, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func startProxyWithLogger(t *testing.T, ctx context.Context, routes []Route, def *Backend, dialer Dialer, statusCache StatusCache, guard FailGuard, options Options, logger *slog.Logger) (*Server, string) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	router := NewStaticRouter(routes, def)
 	options.ListenAddr = "127.0.0.1:0"
-	server := NewServerWithGuard(options, router, dialer, statusCache, guard, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := NewServerWithGuard(options, router, dialer, statusCache, guard, logger)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.Serve(ctx, ln)

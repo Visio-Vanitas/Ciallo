@@ -1,10 +1,13 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +31,9 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 
-	server := New(Options{Enabled: true, Address: addr}, guard, nil)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	server := New(Options{Enabled: true, Address: addr}, guard, logger)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.ListenAndServe(ctx)
@@ -76,6 +81,10 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	}
 	if guard.IsBanned("route-a", "ip", "127.0.0.1") {
 		t.Fatal("ban should be cleared")
+	}
+	text := logs.String()
+	if !strings.Contains(text, "event=management") || !strings.Contains(text, "method=GET") || !strings.Contains(text, "method=DELETE") || !strings.Contains(text, "status=200") {
+		t.Fatalf("management access logs missing fields:\n%s", text)
 	}
 }
 

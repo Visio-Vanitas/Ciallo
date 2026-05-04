@@ -69,7 +69,19 @@ type RouteConfig struct {
 }
 
 type LoggingConfig struct {
-	Level string `yaml:"level"`
+	Level     string            `yaml:"level"`
+	Format    string            `yaml:"format"`
+	Output    string            `yaml:"output"`
+	File      LoggingFileConfig `yaml:"file"`
+	AddSource bool              `yaml:"add_source"`
+}
+
+type LoggingFileConfig struct {
+	Path       string `yaml:"path"`
+	MaxSizeMB  int    `yaml:"max_size_mb"`
+	MaxBackups int    `yaml:"max_backups"`
+	MaxAgeDays int    `yaml:"max_age_days"`
+	Compress   bool   `yaml:"compress"`
 }
 
 type Duration struct {
@@ -138,7 +150,15 @@ func Default() Config {
 			IdleTimeout:       Duration{30 * time.Second},
 		},
 		Logging: LoggingConfig{
-			Level: "info",
+			Level:  "info",
+			Format: "text",
+			Output: "stdout",
+			File: LoggingFileConfig{
+				MaxSizeMB:  100,
+				MaxBackups: 7,
+				MaxAgeDays: 14,
+				Compress:   true,
+			},
 		},
 		MaxHandshakeSize: defaultMaxHandshakeSize,
 	}
@@ -191,6 +211,21 @@ func (c *Config) ApplyDefaults() {
 	if c.Logging.Level == "" {
 		c.Logging.Level = defaults.Logging.Level
 	}
+	if c.Logging.Format == "" {
+		c.Logging.Format = defaults.Logging.Format
+	}
+	if c.Logging.Output == "" {
+		c.Logging.Output = defaults.Logging.Output
+	}
+	if c.Logging.File.MaxSizeMB == 0 {
+		c.Logging.File.MaxSizeMB = defaults.Logging.File.MaxSizeMB
+	}
+	if c.Logging.File.MaxBackups == 0 {
+		c.Logging.File.MaxBackups = defaults.Logging.File.MaxBackups
+	}
+	if c.Logging.File.MaxAgeDays == 0 {
+		c.Logging.File.MaxAgeDays = defaults.Logging.File.MaxAgeDays
+	}
 	if c.MaxHandshakeSize == 0 {
 		c.MaxHandshakeSize = defaults.MaxHandshakeSize
 	}
@@ -229,6 +264,41 @@ func (c Config) Validate() error {
 	}
 	if c.MaxHandshakeSize <= 0 {
 		return errors.New("max_handshake_size must be positive")
+	}
+	if err := validateLogging(c.Logging); err != nil {
+		return fmt.Errorf("logging: %w", err)
+	}
+	return nil
+}
+
+func validateLogging(logging LoggingConfig) error {
+	switch strings.ToLower(strings.TrimSpace(logging.Level)) {
+	case "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("invalid level %q", logging.Level)
+	}
+	switch strings.ToLower(strings.TrimSpace(logging.Format)) {
+	case "text", "json":
+	default:
+		return fmt.Errorf("invalid format %q", logging.Format)
+	}
+	switch strings.ToLower(strings.TrimSpace(logging.Output)) {
+	case "stdout", "stderr":
+	case "file":
+		if strings.TrimSpace(logging.File.Path) == "" {
+			return errors.New("file.path is required when output is file")
+		}
+	default:
+		return fmt.Errorf("invalid output %q", logging.Output)
+	}
+	if logging.File.MaxSizeMB <= 0 {
+		return errors.New("file.max_size_mb must be positive")
+	}
+	if logging.File.MaxBackups < 0 {
+		return errors.New("file.max_backups cannot be negative")
+	}
+	if logging.File.MaxAgeDays < 0 {
+		return errors.New("file.max_age_days cannot be negative")
 	}
 	return nil
 }

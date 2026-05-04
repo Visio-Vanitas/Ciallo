@@ -20,7 +20,7 @@ import (
 	"ciallo/internal/proxy"
 )
 
-var version = "v0.0.2"
+var version = "v0.0.3"
 
 func main() {
 	configPath := flag.String("config", "configs/example.yaml", "path to YAML config")
@@ -38,8 +38,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := logging.New(cfg.Logging.Level)
+	logger, logCloser, err := logging.New(cfg.Logging)
+	if err != nil {
+		slog.Error("configure logging failed", "err", err)
+		os.Exit(1)
+	}
+	defer logCloser.Close()
 	slog.SetDefault(logger)
+	logger.Info("starting ciallo",
+		"version", version,
+		"listen", cfg.Listen,
+		"routes", len(cfg.Routes),
+		"default_backend", cfg.DefaultBackend,
+		"log_level", cfg.Logging.Level,
+		"log_format", cfg.Logging.Format,
+		"log_output", cfg.Logging.Output,
+		"status_cache_enabled", cfg.StatusCache.Enabled,
+		"motd_cache_enabled", cfg.MOTDCache.Enabled,
+		"fail2ban_enabled", cfg.Fail2Ban.Enabled,
+		"management_enabled", cfg.Management.Enabled,
+		"pool_enabled", cfg.Pool.Enabled,
+	)
 
 	routes := cfg.RouteBackends()
 	router := proxy.NewStaticRouter(routes, cfg.DefaultBackendConfig())
@@ -53,7 +72,7 @@ func main() {
 		})
 		defer connPool.Close()
 	}
-	dialer := proxy.NewNetDialer(cfg.Timeouts.BackendDial.Duration, connPool)
+	dialer := proxy.NewNetDialerWithLogger(cfg.Timeouts.BackendDial.Duration, connPool, logger)
 	if connPool != nil {
 		dialer.Warm(context.Background(), cfg.Backends())
 	}

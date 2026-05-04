@@ -62,7 +62,7 @@ default_backend: "127.0.0.1:25566"
 - `status_cache.ttl`：短缓存 TTL，默认 `5s`。
 - `motd_cache.enabled`：启用 MOTD 降级快照。
 - `motd_cache.fallback_ttl`：后端 status 查询失败时，过期 MOTD 快照仍可被用于降级响应的时长。
-- `fail2ban.enabled`：启用实验性内存临时封禁。v0.0.2 默认关闭。
+- `fail2ban.enabled`：启用实验性内存临时封禁。v0.0.3 默认关闭。
 - `fail2ban.max_failures`：窗口期内触发封禁所需的失败次数。
 - `fail2ban.window`：登录失败统计窗口。
 - `fail2ban.ban_duration`：临时封禁时长。
@@ -70,6 +70,27 @@ default_backend: "127.0.0.1:25566"
 - `management.enabled`：启用本地管理 HTTP 服务。默认关闭。
 - `management.address`：管理服务绑定地址，默认 `127.0.0.1:25575`。
 - `pool.enabled`：启用 status 预连接。登录和游戏连接永不复用。
+- `logging.level`：`debug`、`info`、`warn` 或 `error`。
+- `logging.format`：`text` 或 `json`。默认是 `text`。
+- `logging.output`：`stdout`、`stderr` 或 `file`。文件输出带内置轮转。
+- `logging.file.*`：文件路径、大小、备份数量、保留天数和压缩设置。
+
+文件日志示例：
+
+```yaml
+logging:
+  level: "info"
+  format: "json"
+  output: "file"
+  file:
+    path: "logs/ciallo.log"
+    max_size_mb: 100
+    max_backups: 7
+    max_age_days: 14
+    compress: true
+```
+
+status 和 login 连接会输出结构化访问日志，包含路由、后端、协议版本、耗时、缓存结果、ping/pong 处理、字节数、fail2ban 动作和错误摘要。不会记录原始包内容、完整 MOTD JSON、加密数据或游戏流量。
 
 ## 协议说明
 
@@ -88,7 +109,7 @@ Next State VarInt
 
 原版在线模式认证由后端服务器在登录流程进入加密后完成。ciallo 不终止加密，也无法看到 Mojang session 验证结果。因此实验性 fail2ban 使用一个保守的透明信号：代理可见的重复早退登录断开，并按路由加 IP 或玩家名进行隔离统计。
 
-v0.0.2 的 fail2ban 状态保存在内存中。启用本地管理服务后，`GET /fail2ban/bans` 可以列出当前封禁，`DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` 可以在不重启代理的情况下解除一条封禁。
+v0.0.3 的 fail2ban 状态保存在内存中。启用本地管理服务后，`GET /fail2ban/bans` 可以列出当前封禁，`DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` 可以在不重启代理的情况下解除一条封禁。
 
 参考资料：
 

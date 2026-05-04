@@ -62,7 +62,7 @@ Important fields:
 - `status_cache.ttl`: short cache TTL, default `5s`.
 - `motd_cache.enabled`: enables MOTD fallback snapshots.
 - `motd_cache.fallback_ttl`: how long an expired MOTD snapshot can be used when a backend status query fails.
-- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.2.
+- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.3.
 - `fail2ban.max_failures`: failures within the window before a ban.
 - `fail2ban.window`: rolling window for login failures.
 - `fail2ban.ban_duration`: temporary ban duration.
@@ -70,6 +70,27 @@ Important fields:
 - `management.enabled`: enables the local management HTTP server. Disabled by default.
 - `management.address`: management bind address, default `127.0.0.1:25575`.
 - `pool.enabled`: enables status pre-connections. Login and play connections are never reused.
+- `logging.level`: `debug`, `info`, `warn`, or `error`.
+- `logging.format`: `text` or `json`. The default is `text`.
+- `logging.output`: `stdout`, `stderr`, or `file`. File output uses built-in rotation.
+- `logging.file.*`: file path, size, backup count, age, and compression settings.
+
+File logging example:
+
+```yaml
+logging:
+  level: "info"
+  format: "json"
+  output: "file"
+  file:
+    path: "logs/ciallo.log"
+    max_size_mb: 100
+    max_backups: 7
+    max_age_days: 14
+    compress: true
+```
+
+Status and login connections emit structured access logs with route, backend, protocol, duration, cache result, ping/pong handling, byte counts, fail2ban action, and error summary. Packet bodies, MOTD JSON, encryption data, and game traffic are not logged.
 
 ## Protocol Notes
 
@@ -88,7 +109,7 @@ Next State VarInt
 
 Vanilla online-mode authentication is performed by the backend server after the login flow enters encryption. ciallo does not terminate encryption and cannot see the Mojang session verdict. The experimental fail2ban mechanism therefore uses a conservative transparent signal: repeated early login disconnects visible at the proxy, scoped by route plus IP or player name.
 
-Fail2ban state is in memory for v0.0.2. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
+Fail2ban state is in memory for v0.0.3. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
 
 References:
 

@@ -24,6 +24,18 @@ type Server struct {
 	ln net.Listener
 }
 
+type StatusResult struct {
+	CacheResult  string
+	FallbackUsed bool
+	PongHandled  bool
+}
+
+type LoginResult struct {
+	Stats          PipeStats
+	Username       string
+	Fail2BanAction string
+}
+
 func NewServer(options Options, router Router, dialer Dialer, cache StatusCache, logger *slog.Logger) *Server {
 	return NewServerWithGuard(options, router, dialer, cache, nil, logger)
 }
@@ -154,31 +166,46 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 
 	switch handshake.NextState {
 	case mcproto.NextStateStatus:
-		if err := s.handleStatus(parent, client, backend, handshake, handshakePacket, logger); err != nil {
+		result, err := s.handleStatus(parent, client, backend, handshake, handshakePacket, logger)
+		logger.Info("access",
+			"event", "status",
+			"duration_ms", time.Since(start).Milliseconds(),
+			"cache_result", result.CacheResult,
+			"fallback_used", result.FallbackUsed,
+			"pong_handled", result.PongHandled,
+			"err", errString(err),
+		)
+		if err != nil {
 			logger.Debug("status failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
 		}
 	case mcproto.NextStateLogin:
-		stats, err := s.handleLogin(parent, client, backend, host, handshake, handshakePacket, remoteIP(client))
+		result, err := s.handleLogin(parent, client, backend, host, handshake, handshakePacket, remoteIP(client))
+		logger.Info("access",
+			"event", "login",
+			"username", result.Username,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"bytes_client_to_backend", result.Stats.ClientToBackend,
+			"bytes_backend_to_client", result.Stats.BackendToClient,
+			"fail2ban_action", result.Fail2BanAction,
+			"err", errString(err),
+		)
 		if err != nil {
 			logger.Debug("login proxy failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
 			return
 		}
-		logger.Info("proxy closed",
-			"duration_ms", time.Since(start).Milliseconds(),
-			"bytes_client_to_backend", stats.ClientToBackend,
-			"bytes_backend_to_client", stats.BackendToClient,
-		)
 	default:
 		logger.Debug("unsupported next state")
 	}
 }
 
-func (s *Server) handleLogin(parent context.Context, client net.Conn, backend Backend, route string, handshake mcproto.Handshake, handshakePacket mcproto.Packet, ip string) (PipeStats, error) {
+func (s *Server) handleLogin(parent context.Context, client net.Conn, backend Backend, route string, handshake mcproto.Handshake, handshakePacket mcproto.Packet, ip string) (LoginResult, error) {
+	result := LoginResult{Fail2BanAction: "none"}
 	if route == "" {
 		route = routeKey(backend)
 	}
 	if s.isBanned(route, "ip", ip) {
-		return PipeStats{}, fmt.Errorf("fail2ban ip banned")
+		result.Fail2BanAction = "ip_banned"
+		return result, fmt.Errorf("fail2ban ip banned")
 	}
 
 	if s.options.HandshakeTimeout > 0 {
@@ -186,18 +213,20 @@ func (s *Server) handleLogin(parent context.Context, client net.Conn, backend Ba
 	}
 	loginStart, err := mcproto.ReadPacket(client, s.options.MaxHandshakeSize)
 	if err != nil {
-		return PipeStats{}, fmt.Errorf("read login start: %w", err)
+		return result, fmt.Errorf("read login start: %w", err)
 	}
 	_ = client.SetReadDeadline(time.Time{})
 
 	login, parseErr := mcproto.ParseLoginStart(loginStart, handshake.ProtocolVersion)
 	username := login.Username
+	result.Username = username
 	if parseErr != nil {
 		s.logger.Debug("parse login start failed", "err", parseErr, "route", route, "ip", ip)
 	}
 	if username != "" && s.isBanned(route, "player", username) {
 		_ = mcproto.WritePacket(client, mcproto.BuildLoginDisconnect(`{"text":"Temporarily banned by proxy"}`))
-		return PipeStats{}, fmt.Errorf("fail2ban player banned")
+		result.Fail2BanAction = "player_banned"
+		return result, fmt.Errorf("fail2ban player banned")
 	}
 
 	ctx, cancel := context.WithTimeout(parent, s.options.BackendDialTimeout)
@@ -206,53 +235,64 @@ func (s *Server) handleLogin(parent context.Context, client net.Conn, backend Ba
 	loginObserved := time.Now()
 	backendConn, err := s.dialer.Dial(ctx, backend)
 	if err != nil {
-		return PipeStats{}, err
+		return result, err
 	}
 	if _, err := backendConn.Write(handshakePacket.Raw); err != nil {
 		s.recordEarlyLoginFailure(loginObserved, route, ip, username)
 		_ = backendConn.Close()
-		return PipeStats{}, err
+		result.Fail2BanAction = "record_failure"
+		return result, err
 	}
 	if _, err := backendConn.Write(loginStart.Raw); err != nil {
 		s.recordEarlyLoginFailure(loginObserved, route, ip, username)
 		_ = backendConn.Close()
-		return PipeStats{}, err
+		result.Fail2BanAction = "record_failure"
+		return result, err
 	}
 	start := time.Now()
 	stats := ProxyBidirectional(client, backendConn, s.options.IdleTimeout)
+	result.Stats = stats
 	if s.shouldRecordFailure(start, stats) {
 		s.recordLoginFailure(route, ip, username)
+		result.Fail2BanAction = "record_failure"
 	} else {
 		s.recordSuccess(route, "ip", ip)
 		if username != "" {
 			s.recordSuccess(route, "player", username)
 		}
+		result.Fail2BanAction = "record_success"
 	}
-	return stats, nil
+	return result, nil
 }
 
-func (s *Server) handleStatus(parent context.Context, client net.Conn, backend Backend, handshake mcproto.Handshake, handshakePacket mcproto.Packet, logger *slog.Logger) error {
+func (s *Server) handleStatus(parent context.Context, client net.Conn, backend Backend, handshake mcproto.Handshake, handshakePacket mcproto.Packet, logger *slog.Logger) (StatusResult, error) {
+	result := StatusResult{CacheResult: "disabled"}
 	if s.options.HandshakeTimeout > 0 {
 		_ = client.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout))
 	}
 	statusRequest, err := mcproto.ReadPacket(client, s.options.MaxHandshakeSize)
 	if err != nil {
-		return fmt.Errorf("read status request: %w", err)
+		return result, fmt.Errorf("read status request: %w", err)
 	}
 	_ = client.SetReadDeadline(time.Time{})
 	if statusRequest.ID != mcproto.StatusRequestPacketID {
-		return fmt.Errorf("unexpected status request packet id 0x%x", statusRequest.ID)
+		return result, fmt.Errorf("unexpected status request packet id 0x%x", statusRequest.ID)
 	}
 
 	cacheKey := fmt.Sprintf("%s|%s|%d", backend.Addr, NormalizeHost(handshake.ServerAddress), handshake.ProtocolVersion)
 	cacheEnabled := s.statusCacheEnabled(backend)
+	if cacheEnabled {
+		result.CacheResult = "miss"
+	}
 	if cacheEnabled && s.cache != nil {
 		if raw, ok := s.cache.Get(cacheKey); ok {
+			result.CacheResult = "hit"
 			logger.Debug("status cache hit")
 			if _, err := client.Write(raw); err != nil {
-				return err
+				return result, err
 			}
-			return s.handleCachedPing(client)
+			result.PongHandled, err = s.handleCachedPing(client)
+			return result, err
 		}
 	}
 	logger.Debug("status cache miss")
@@ -262,45 +302,52 @@ func (s *Server) handleStatus(parent context.Context, client net.Conn, backend B
 	backendConn, err := s.dialStatus(ctx, backend)
 	if err != nil {
 		if fallback, ok := s.statusFallback(cacheKey, handshake.ProtocolVersion, cacheEnabled); ok {
+			result.CacheResult = "fallback"
+			result.FallbackUsed = true
 			logger.Debug("status fallback hit", "err", err)
 			if _, writeErr := client.Write(fallback); writeErr != nil {
-				return writeErr
+				return result, writeErr
 			}
-			return s.handleCachedPing(client)
+			result.PongHandled, err = s.handleCachedPing(client)
+			return result, err
 		}
-		return err
+		return result, err
 	}
 	defer backendConn.Close()
 	s.setShortDeadline(backendConn)
 	defer backendConn.SetDeadline(time.Time{})
 
 	if _, err := backendConn.Write(handshakePacket.Raw); err != nil {
-		return err
+		return result, err
 	}
 	if _, err := backendConn.Write(statusRequest.Raw); err != nil {
-		return err
+		return result, err
 	}
 	response, err := mcproto.ReadPacket(backendConn, mcproto.MaxPacketLength)
 	if err != nil {
 		if fallback, ok := s.statusFallback(cacheKey, handshake.ProtocolVersion, cacheEnabled); ok {
+			result.CacheResult = "fallback"
+			result.FallbackUsed = true
 			logger.Debug("status fallback hit", "err", err)
 			if _, writeErr := client.Write(fallback); writeErr != nil {
-				return writeErr
+				return result, writeErr
 			}
-			return s.handleCachedPing(client)
+			result.PongHandled, err = s.handleCachedPing(client)
+			return result, err
 		}
-		return fmt.Errorf("read status response: %w", err)
+		return result, fmt.Errorf("read status response: %w", err)
 	}
 	if response.ID != mcproto.StatusResponsePacketID {
-		return fmt.Errorf("unexpected status response packet id 0x%x", response.ID)
+		return result, fmt.Errorf("unexpected status response packet id 0x%x", response.ID)
 	}
 	if _, err := client.Write(response.Raw); err != nil {
-		return err
+		return result, err
 	}
 	if cacheEnabled && s.cache != nil {
 		s.cache.SetWithFallback(cacheKey, response.Raw, s.options.StatusCacheTTL, s.motdFallbackTTL())
 	}
-	return s.proxyStatusPing(client, backendConn)
+	result.PongHandled, err = s.proxyStatusPing(client, backendConn)
+	return result, err
 }
 
 func (s *Server) statusFallback(cacheKey string, protocolVersion int32, cacheEnabled bool) ([]byte, bool) {
@@ -392,40 +439,47 @@ func (s *Server) setShortDeadline(conn net.Conn) {
 	}
 }
 
-func (s *Server) handleCachedPing(client net.Conn) error {
+func (s *Server) handleCachedPing(client net.Conn) (bool, error) {
 	if s.options.HandshakeTimeout > 0 {
 		_ = client.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout))
 	}
 	ping, err := mcproto.ReadPacket(client, s.options.MaxHandshakeSize)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	if ping.ID != mcproto.StatusPingPacketID {
-		return nil
+		return false, nil
 	}
 	pong, err := mcproto.BuildPong(ping.Data)
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = client.Write(pong.Raw)
-	return err
+	return err == nil, err
 }
 
-func (s *Server) proxyStatusPing(client, backend net.Conn) error {
+func (s *Server) proxyStatusPing(client, backend net.Conn) (bool, error) {
 	if s.options.HandshakeTimeout > 0 {
 		_ = client.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout))
 	}
 	ping, err := mcproto.ReadPacket(client, s.options.MaxHandshakeSize)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	if _, err := backend.Write(ping.Raw); err != nil {
-		return err
+		return false, err
 	}
 	pong, err := mcproto.ReadPacket(backend, s.options.MaxHandshakeSize)
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = client.Write(pong.Raw)
-	return err
+	return err == nil, err
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

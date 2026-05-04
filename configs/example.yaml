@@ -16,7 +16,7 @@ motd_cache:
   fallback_ttl: "5m"
 
 fail2ban:
-  # Experimental in v0.0.2. Disabled by default.
+  # Experimental in v0.0.3. Disabled by default.
   enabled: false
   max_failures: 5
   window: "1m"
@@ -48,3 +48,13 @@ default_backend: "127.0.0.1:25566"
 
 logging:
   level: "info"
+  format: "text"
+  output: "stdout"
+  add_source: false
+  file:
+    # Required only when output is "file".
+    path: "logs/ciallo.log"
+    max_size_mb: 100
+    max_backups: 7
+    max_age_days: 14
+    compress: true
