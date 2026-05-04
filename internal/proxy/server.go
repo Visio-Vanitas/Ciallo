@@ -203,25 +203,25 @@ func (s *Server) handleLogin(parent context.Context, client net.Conn, backend Ba
 	ctx, cancel := context.WithTimeout(parent, s.options.BackendDialTimeout)
 	defer cancel()
 
+	loginObserved := time.Now()
 	backendConn, err := s.dialer.Dial(ctx, backend)
 	if err != nil {
 		return PipeStats{}, err
 	}
 	if _, err := backendConn.Write(handshakePacket.Raw); err != nil {
+		s.recordEarlyLoginFailure(loginObserved, route, ip, username)
 		_ = backendConn.Close()
 		return PipeStats{}, err
 	}
 	if _, err := backendConn.Write(loginStart.Raw); err != nil {
+		s.recordEarlyLoginFailure(loginObserved, route, ip, username)
 		_ = backendConn.Close()
 		return PipeStats{}, err
 	}
 	start := time.Now()
 	stats := ProxyBidirectional(client, backendConn, s.options.IdleTimeout)
 	if s.shouldRecordFailure(start, stats) {
-		s.recordFailure(route, "ip", ip)
-		if username != "" {
-			s.recordFailure(route, "player", username)
-		}
+		s.recordLoginFailure(route, ip, username)
 	} else {
 		s.recordSuccess(route, "ip", ip)
 		if username != "" {
@@ -345,6 +345,23 @@ func (s *Server) recordSuccess(route, kind, value string) {
 	if s.guard != nil {
 		s.guard.RecordSuccess(route, kind, value)
 	}
+}
+
+func (s *Server) recordLoginFailure(route, ip, username string) {
+	s.recordFailure(route, "ip", ip)
+	if username != "" {
+		s.recordFailure(route, "player", username)
+	}
+}
+
+func (s *Server) recordEarlyLoginFailure(start time.Time, route, ip, username string) {
+	if s.guard == nil || !s.guard.Enabled() {
+		return
+	}
+	if time.Since(start) > s.guard.EarlyDisconnect() {
+		return
+	}
+	s.recordLoginFailure(route, ip, username)
 }
 
 func (s *Server) shouldRecordFailure(start time.Time, stats PipeStats) bool {

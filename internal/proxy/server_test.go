@@ -210,6 +210,35 @@ func TestFail2BanBansIPAfterEarlyDisconnects(t *testing.T) {
 	}
 }
 
+func TestFail2BanRecordsBackendReplayFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend := startEarlyCloseBackend(t)
+	guard := fail2ban.New(fail2ban.Options{
+		Enabled:         true,
+		MaxFailures:     1,
+		Window:          time.Minute,
+		BanDuration:     time.Minute,
+		EarlyDisconnect: time.Minute,
+	}, time.Now)
+	server, addr := startProxyWithOptions(t, ctx, []Route{
+		{Hosts: []string{"replay.example.com"}, Backend: Backend{Name: "replay", Addr: backend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), guard, Options{
+		HandshakeTimeout:   time.Second,
+		BackendDialTimeout: time.Second,
+		IdleTimeout:        time.Second,
+		MaxHandshakeSize:   64 * 1024,
+		StatusCacheEnabled: true,
+		StatusCacheTTL:     time.Second,
+	})
+	defer server.Shutdown(context.Background())
+
+	_ = dialLoginAllowEOF(t, addr, "replay.example.com", "Alex", []byte("payload"))
+	waitForBan(t, guard, "replay.example.com", "ip", "127.0.0.1")
+	waitForBan(t, guard, "replay.example.com", "player", "Alex")
+}
+
 func TestFail2BanIsRouteScopedByHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
