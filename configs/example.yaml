@@ -1,0 +1,50 @@
+listen: ":25565"
+max_handshake_size: 65536
+
+timeouts:
+  handshake: "3s"
+  backend_dial: "3s"
+  idle: "10m"
+  shutdown: "10s"
+
+status_cache:
+  enabled: true
+  ttl: "5s"
+
+motd_cache:
+  enabled: true
+  fallback_ttl: "5m"
+
+fail2ban:
+  # Experimental in v0.0.2. Disabled by default.
+  enabled: false
+  max_failures: 5
+  window: "1m"
+  ban_duration: "10m"
+  early_disconnect: "5s"
+
+management:
+  # Local-only management surface for clearing in-memory fail2ban entries.
+  enabled: false
+  address: "127.0.0.1:25575"
+
+pool:
+  enabled: false
+  max_idle_per_backend: 8
+  idle_timeout: "30s"
+
+routes:
+  - hosts:
+      - "survival.example.com"
+      - "mc.example.com"
+    backend: "127.0.0.1:25566"
+    status_cache: true
+  - hosts:
+      - "creative.example.com"
+    backend: "127.0.0.1:25567"
+    status_cache: true
+
+default_backend: "127.0.0.1:25566"
+
+logging:
+  level: "info"

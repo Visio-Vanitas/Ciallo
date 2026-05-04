@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          test -z "$unformatted"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check version
+        run: |
+          version="$(cat VERSION)"
+          test "$version" = "$(go run ./cmd/mcproxy -version)"
+          echo "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+      - name: Test
+        run: go test ./...

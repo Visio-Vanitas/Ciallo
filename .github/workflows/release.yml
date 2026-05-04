@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "!v0.0.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Formal release tag, for example v0.1.0. v0.0.x test builds are not released."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.tag }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $version" >&2
+            exit 1
+          fi
+          if [[ "$version" =~ ^v0\.0\. ]]; then
+            echo "v0.0.x is reserved for test builds and must not create releases: $version" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          if [[ "$(cat VERSION)" != "${VERSION}" ]]; then
+            echo "VERSION file must match release tag ${VERSION}" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          name="ciallo-${VERSION}-${GOOS}-${GOARCH}"
+          binary="mcproxy"
+          if [[ "${GOOS}" == "windows" ]]; then
+            binary="mcproxy.exe"
+          fi
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${name}/${binary}" ./cmd/mcproxy
+          cp README.md LICENSE configs/example.yaml "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciallo-${{ steps.version.outputs.value }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.tar.gz
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.tag }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $version" >&2
+            exit 1
+          fi
+          if [[ "$version" =~ ^v0\.0\. ]]; then
+            echo "v0.0.x is reserved for test builds and must not create releases: $version" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.value }}
+          name: ciallo ${{ steps.version.outputs.value }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
