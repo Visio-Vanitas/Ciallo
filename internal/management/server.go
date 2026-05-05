@@ -177,7 +177,7 @@ func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 
 func versionOrDefault(version string) string {
 	if version == "" {
-		return "0.0.5"
+		return "0.0.6"
 	}
 	return version
 }

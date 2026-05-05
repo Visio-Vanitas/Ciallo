@@ -53,17 +53,32 @@ func ExtractMOTD(statusJSON string) (json.RawMessage, bool) {
 	return append(json.RawMessage(nil), description...), true
 }
 
+type FallbackStatusOptions struct {
+	VersionName string
+	PlayersMax  int
+}
+
 func BuildFallbackStatus(protocolVersion int32, motd json.RawMessage) (Packet, error) {
+	return BuildFallbackStatusWithOptions(protocolVersion, motd, FallbackStatusOptions{})
+}
+
+func BuildFallbackStatusWithOptions(protocolVersion int32, motd json.RawMessage, options FallbackStatusOptions) (Packet, error) {
+	if options.VersionName == "" {
+		options.VersionName = "ciallo fallback"
+	}
+	if options.PlayersMax < 0 {
+		options.PlayersMax = 0
+	}
 	if len(motd) == 0 {
 		motd = json.RawMessage(`{"text":"Server status temporarily unavailable"}`)
 	}
 	root := map[string]any{
 		"version": map[string]any{
-			"name":     "ciallo fallback",
+			"name":     options.VersionName,
 			"protocol": protocolVersion,
 		},
 		"players": map[string]any{
-			"max":    0,
+			"max":    options.PlayersMax,
 			"online": 0,
 		},
 		"description": json.RawMessage(append([]byte(nil), motd...)),

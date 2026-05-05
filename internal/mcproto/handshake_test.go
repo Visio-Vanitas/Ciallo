@@ -27,12 +27,13 @@ func TestParseHandshake(t *testing.T) {
 
 func TestNormalizeHost(t *testing.T) {
 	cases := map[string]string{
-		"Survival.Example.Com.":       "survival.example.com",
-		"survival.example.com:25565":  "survival.example.com",
-		"survival.example.com\x00tag": "survival.example.com",
-		"  MC.Example.Com  ":          "mc.example.com",
-		"[2001:db8::1]":               "2001:db8::1",
-		"[2001:db8::1]:25565":         "2001:db8::1",
+		"Survival.Example.Com.":        "survival.example.com",
+		"survival.example.com:25565":   "survival.example.com",
+		"survival.example.com\x00tag":  "survival.example.com",
+		"Forge.Example.COM\x00FML\x00": "forge.example.com",
+		"  MC.Example.Com  ":           "mc.example.com",
+		"[2001:db8::1]":                "2001:db8::1",
+		"[2001:db8::1]:25565":          "2001:db8::1",
 	}
 	for input, want := range cases {
 		if got := NormalizeHost(input); got != want {

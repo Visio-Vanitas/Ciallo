@@ -21,6 +21,12 @@ func TestBackendHealthDefaults(t *testing.T) {
 	if cfg.BackendHealth.ProbeProtocol != 772 || !cfg.BackendHealth.StatusFallbackWhenUnhealthy {
 		t.Fatalf("bad probe/fallback defaults: %+v", cfg.BackendHealth)
 	}
+	if cfg.MaxStatusResponseSize != 256*1024 {
+		t.Fatalf("max status response size = %d", cfg.MaxStatusResponseSize)
+	}
+	if cfg.StatusFallback.VersionName != "ciallo fallback" || cfg.StatusFallback.PlayersMax != 0 {
+		t.Fatalf("bad status fallback defaults: %+v", cfg.StatusFallback)
+	}
 }
 
 func TestLoggingDefaults(t *testing.T) {
@@ -86,5 +92,57 @@ logging:
 	}
 	if _, err := LoadFile(path); err == nil {
 		t.Fatal("LoadFile should reject file logging without path")
+	}
+}
+
+func TestLoadFileStatusFallbackConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+listen: ":25565"
+max_status_response_size: 131072
+default_backend: "127.0.0.1:25566"
+status_fallback:
+  version_name: "cached status"
+  players_max: 99
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxStatusResponseSize != 131072 {
+		t.Fatalf("max status response size = %d", cfg.MaxStatusResponseSize)
+	}
+	if cfg.StatusFallback.VersionName != "cached status" || cfg.StatusFallback.PlayersMax != 99 {
+		t.Fatalf("status fallback = %+v", cfg.StatusFallback)
+	}
+}
+
+func TestLoadFileRejectsInvalidStatusHardening(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+listen: ":25565"
+max_status_response_size: -1
+default_backend: "127.0.0.1:25566"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("LoadFile should reject negative max_status_response_size")
+	}
+
+	if err := os.WriteFile(path, []byte(`
+listen: ":25565"
+default_backend: "127.0.0.1:25566"
+status_fallback:
+  players_max: -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("LoadFile should reject negative status_fallback.players_max")
 	}
 }

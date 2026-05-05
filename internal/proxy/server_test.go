@@ -120,7 +120,7 @@ func TestStatusAccessLogReportsCacheResult(t *testing.T) {
 	_ = dialStatus(t, addr, "status.example.com", 10)
 	_ = dialStatus(t, addr, "status.example.com", 20)
 
-	waitForLog(t, &logs, "event=status", "cache_result=miss", "cache_result=hit", "pong_handled=true")
+	waitForLog(t, &logs, "event=status", "cache_result=miss", "cache_result=hit", "pong_handled=true", "err_kind=none")
 }
 
 func TestRouteCanDisableStatusCache(t *testing.T) {
@@ -250,6 +250,96 @@ func TestStatusMOTDFallback(t *testing.T) {
 	}
 	if result.pongValue != 42 {
 		t.Fatalf("pong = %d", result.pongValue)
+	}
+}
+
+func TestStatusFallbackUsesConfiguredShape(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	now := time.Unix(100, 0)
+	statusCache := cache.NewStatusCache(func() time.Time { return now })
+	status := mcproto.BuildStatusResponse(`{"version":{"name":"test","protocol":765},"players":{"max":20,"online":1},"description":{"text":"fallback motd"}}`)
+	statusCache.SetWithFallback("127.0.0.1:1|status.example.com|765", status.Raw, time.Second, time.Minute)
+	now = now.Add(2 * time.Second)
+
+	server, addr := startProxyWithOptions(t, ctx, []Route{
+		{Hosts: []string{"status.example.com"}, Backend: Backend{Name: "127.0.0.1:1", Addr: "127.0.0.1:1"}},
+	}, nil, NewNetDialer(10*time.Millisecond, nil), statusCache, nil, Options{
+		HandshakeTimeout:      time.Second,
+		BackendDialTimeout:    10 * time.Millisecond,
+		IdleTimeout:           time.Second,
+		MaxHandshakeSize:      64 * 1024,
+		MaxStatusResponseSize: 64 * 1024,
+		StatusCacheEnabled:    true,
+		StatusCacheTTL:        time.Second,
+		MOTDCacheEnabled:      true,
+		MOTDFallbackTTL:       time.Minute,
+		StatusFallback: FallbackStatusOptions{
+			VersionName: "custom fallback",
+			PlayersMax:  99,
+		},
+	})
+	defer server.Shutdown(context.Background())
+
+	result := dialStatus(t, addr, "status.example.com", 42)
+	if !strings.Contains(result.statusJSON, `"name":"custom fallback"`) || !strings.Contains(result.statusJSON, `"max":99`) || !strings.Contains(result.statusJSON, `"online":0`) {
+		t.Fatalf("fallback response missing configured shape: %s", result.statusJSON)
+	}
+}
+
+func TestStatusRejectsOversizedBackendResponse(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	backend := startStatusBackend(t, `{"version":{"name":"test","protocol":765},"players":{"max":20,"online":1},"description":{"text":"this response is intentionally too large for the proxy limit"}}`)
+	server, addr := startProxyWithLogger(t, ctx, []Route{
+		{Hosts: []string{"status.example.com"}, Backend: Backend{Name: "status", Addr: backend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), nil, Options{
+		HandshakeTimeout:      time.Second,
+		BackendDialTimeout:    time.Second,
+		IdleTimeout:           time.Second,
+		MaxHandshakeSize:      64 * 1024,
+		MaxStatusResponseSize: 16,
+		StatusCacheEnabled:    true,
+		StatusCacheTTL:        time.Second,
+		MOTDCacheEnabled:      true,
+		MOTDFallbackTTL:       time.Minute,
+	}, logger)
+	defer server.Shutdown(context.Background())
+
+	if err := dialStatusAllowError(addr, "status.example.com"); err == nil {
+		t.Fatal("expected oversized status response to fail")
+	}
+	waitForLog(t, &logs, "event=status", "err_kind=backend_status_failed")
+}
+
+func TestStatusAllowsLargeButBoundedBackendResponse(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	largeMOTD := strings.Repeat("x", 24*1024)
+	backend := startStatusBackend(t, `{"version":{"name":"test","protocol":765},"players":{"max":20,"online":1},"description":{"text":"`+largeMOTD+`"}}`)
+	server, addr := startProxyWithOptions(t, ctx, []Route{
+		{Hosts: []string{"status.example.com"}, Backend: Backend{Name: "status", Addr: backend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), nil, Options{
+		HandshakeTimeout:      time.Second,
+		BackendDialTimeout:    time.Second,
+		IdleTimeout:           time.Second,
+		MaxHandshakeSize:      64 * 1024,
+		MaxStatusResponseSize: 64 * 1024,
+		StatusCacheEnabled:    true,
+		StatusCacheTTL:        time.Second,
+		MOTDCacheEnabled:      true,
+		MOTDFallbackTTL:       time.Minute,
+	})
+	defer server.Shutdown(context.Background())
+
+	result := dialStatus(t, addr, "status.example.com", 42)
+	if !strings.Contains(result.statusJSON, largeMOTD[:128]) {
+		t.Fatal("large bounded status response did not pass through")
 	}
 }
 
@@ -414,7 +504,7 @@ func TestLoginAccessLogReportsFail2BanAction(t *testing.T) {
 	_ = dialLoginAllowEOF(t, addr, "ban.example.com", "Steve", []byte("payload"))
 	waitForBan(t, guard, "ban.example.com", "ip", "127.0.0.1")
 
-	waitForLog(t, &logs, "event=login", "username=Steve", "fail2ban_action=record_failure")
+	waitForLog(t, &logs, "event=login", "username=Steve", "fail2ban_action=record_failure", "err_kind=none")
 }
 
 func TestFail2BanIsRouteScopedByHost(t *testing.T) {
@@ -812,4 +902,21 @@ func dialStatus(t *testing.T, addr, host string, pingValue int64) statusResult {
 		statusJSON: statusJSON,
 		pongValue:  value,
 	}
+}
+
+func dialStatusAllowError(addr, host string) error {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	handshake := mcproto.BuildHandshake(765, host, 25565, mcproto.NextStateStatus)
+	if _, err := conn.Write(handshake.Raw); err != nil {
+		return err
+	}
+	if _, err := conn.Write(mcproto.NewPacket(mcproto.StatusRequestPacketID, nil).Raw); err != nil {
+		return err
+	}
+	_, err = mcproto.ReadPacket(conn, 64*1024)
+	return err
 }

@@ -18,9 +18,6 @@ func ReadPacket(r io.Reader, maxLen int) (Packet, error) {
 	if err != nil {
 		return Packet{}, err
 	}
-	if len(lengthRaw) > MaxPacketLengthBytes {
-		return Packet{}, fmt.Errorf("packet length varint exceeds %d bytes", MaxPacketLengthBytes)
-	}
 	if err := CheckPacketLength(length, maxLen); err != nil {
 		return Packet{}, err
 	}

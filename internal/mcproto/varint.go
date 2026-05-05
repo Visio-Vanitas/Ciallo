@@ -7,7 +7,6 @@ import (
 )
 
 const MaxVarIntBytes = 5
-const MaxPacketLengthBytes = 3
 const MaxPacketLength = 1<<21 - 1
 
 var ErrVarIntTooLong = errors.New("varint is too long")

@@ -1,5 +1,6 @@
 listen: ":25565"
 max_handshake_size: 65536
+max_status_response_size: 262144
 
 timeouts:
   handshake: "3s"
@@ -15,6 +16,10 @@ motd_cache:
   enabled: true
   fallback_ttl: "5m"
 
+status_fallback:
+  version_name: "ciallo fallback"
+  players_max: 0
+
 backend_health:
   enabled: true
   interval: "10s"
@@ -27,7 +32,7 @@ backend_health:
   status_fallback_when_unhealthy: true
 
 fail2ban:
-  # Experimental in v0.0.5. Disabled by default.
+  # Experimental in v0.0.6. Disabled by default.
   enabled: false
   max_failures: 5
   window: "1m"

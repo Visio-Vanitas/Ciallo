@@ -37,3 +37,18 @@ func TestPacketLengthLimit(t *testing.T) {
 		t.Fatal("expected packet length error")
 	}
 }
+
+func TestReadPacketAcceptsConfiguredLargePacket(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), MaxPacketLength)
+	packet := NewPacket(0, data)
+	if VarIntSize(int32(len(packet.Payload))) <= 3 {
+		t.Fatalf("test packet length varint is not large enough: payload=%d", len(packet.Payload))
+	}
+	got, err := ReadPacket(bytes.NewReader(packet.Raw), len(packet.Payload))
+	if err != nil {
+		t.Fatalf("ReadPacket large configured packet: %v", err)
+	}
+	if len(got.Data) != len(data) {
+		t.Fatalf("data len = %d, want %d", len(got.Data), len(data))
+	}
+}

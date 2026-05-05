@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +38,8 @@ type LoginResult struct {
 	Fail2BanAction string
 }
 
+var errUnsupportedState = errors.New("unsupported next state")
+
 func NewServer(options Options, router Router, dialer Dialer, cache StatusCache, logger *slog.Logger) *Server {
 	return NewServerWithGuard(options, router, dialer, cache, nil, logger)
 }
@@ -55,6 +59,9 @@ func NewServerWithGuard(options Options, router Router, dialer Dialer, cache Sta
 	}
 	if options.MaxHandshakeSize == 0 {
 		options.MaxHandshakeSize = 64 * 1024
+	}
+	if options.MaxStatusResponseSize == 0 {
+		options.MaxStatusResponseSize = 256 * 1024
 	}
 	if options.StatusCacheTTL == 0 {
 		options.StatusCacheTTL = 5 * time.Second
@@ -150,12 +157,12 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 	}
 	handshakePacket, err := mcproto.ReadPacket(client, s.options.MaxHandshakeSize)
 	if err != nil {
-		logger.Debug("bad handshake", "err", err)
+		logger.Debug("bad handshake", "err", err, "err_kind", classifyError(err, "handshake"))
 		return
 	}
 	handshake, err := mcproto.ParseHandshake(handshakePacket)
 	if err != nil {
-		logger.Debug("parse handshake failed", "err", err)
+		logger.Debug("parse handshake failed", "err", err, "err_kind", classifyError(err, "handshake"))
 		return
 	}
 	_ = client.SetReadDeadline(time.Time{})
@@ -163,7 +170,7 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 	host := NormalizeHost(handshake.ServerAddress)
 	backend, ok := s.router.Resolve(host)
 	if !ok {
-		logger.Warn("route not found", "host", host, "protocol_version", handshake.ProtocolVersion)
+		logger.Warn("route not found", "host", host, "protocol_version", handshake.ProtocolVersion, "err_kind", "route_not_found")
 		return
 	}
 
@@ -187,6 +194,7 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 			"fallback_used", result.FallbackUsed,
 			"pong_handled", result.PongHandled,
 			"err", errString(err),
+			"err_kind", classifyError(err, "status"),
 		)
 		if err != nil {
 			logger.Debug("status failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
@@ -210,13 +218,14 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 			"bytes_backend_to_client", result.Stats.BackendToClient,
 			"fail2ban_action", result.Fail2BanAction,
 			"err", errString(err),
+			"err_kind", classifyError(err, "login"),
 		)
 		if err != nil {
 			logger.Debug("login proxy failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
 			return
 		}
 	default:
-		logger.Debug("unsupported next state")
+		logger.Debug("unsupported next state", "err_kind", classifyError(errUnsupportedState, "state"))
 	}
 }
 
@@ -258,19 +267,19 @@ func (s *Server) handleLogin(parent context.Context, client net.Conn, backend Ba
 	backendConn, err := s.dialer.Dial(ctx, backend)
 	if err != nil {
 		s.recordBackendDialError(route, backend)
-		return result, err
+		return result, fmt.Errorf("backend dial: %w", err)
 	}
 	if _, err := backendConn.Write(handshakePacket.Raw); err != nil {
 		s.recordEarlyLoginFailure(loginObserved, route, ip, username)
 		_ = backendConn.Close()
 		result.Fail2BanAction = "record_failure"
-		return result, err
+		return result, fmt.Errorf("backend replay handshake: %w", err)
 	}
 	if _, err := backendConn.Write(loginStart.Raw); err != nil {
 		s.recordEarlyLoginFailure(loginObserved, route, ip, username)
 		_ = backendConn.Close()
 		result.Fail2BanAction = "record_failure"
-		return result, err
+		return result, fmt.Errorf("backend replay login start: %w", err)
 	}
 	start := time.Now()
 	stats := ProxyBidirectional(client, backendConn, s.options.IdleTimeout)
@@ -353,7 +362,7 @@ func (s *Server) handleStatus(parent context.Context, client net.Conn, backend B
 			result.PongHandled, err = s.handleCachedPing(client)
 			return result, err
 		}
-		return result, err
+		return result, fmt.Errorf("backend dial: %w", err)
 	}
 	defer backendConn.Close()
 	s.setShortDeadline(backendConn)
@@ -361,13 +370,13 @@ func (s *Server) handleStatus(parent context.Context, client net.Conn, backend B
 
 	if _, err := backendConn.Write(handshakePacket.Raw); err != nil {
 		s.recordBackendHealthFailure(backend, err)
-		return result, err
+		return result, fmt.Errorf("backend replay handshake: %w", err)
 	}
 	if _, err := backendConn.Write(statusRequest.Raw); err != nil {
 		s.recordBackendHealthFailure(backend, err)
-		return result, err
+		return result, fmt.Errorf("backend replay status request: %w", err)
 	}
-	response, err := mcproto.ReadPacket(backendConn, mcproto.MaxPacketLength)
+	response, err := mcproto.ReadPacket(backendConn, s.options.MaxStatusResponseSize)
 	if err != nil {
 		s.recordBackendHealthFailure(backend, err)
 		if fallback, ok := s.statusFallback(cacheKey, handshake.ProtocolVersion, cacheEnabled); ok {
@@ -402,7 +411,14 @@ func (s *Server) statusFallback(cacheKey string, protocolVersion int32, cacheEna
 	if !cacheEnabled || !s.options.MOTDCacheEnabled || s.cache == nil {
 		return nil, false
 	}
-	return s.cache.GetFallback(cacheKey, protocolVersion)
+	return s.cache.GetFallbackWithOptions(cacheKey, protocolVersion, mcprotoFallbackOptions(s.options.StatusFallback))
+}
+
+func mcprotoFallbackOptions(options FallbackStatusOptions) mcproto.FallbackStatusOptions {
+	return mcproto.FallbackStatusOptions{
+		VersionName: options.VersionName,
+		PlayersMax:  options.PlayersMax,
+	}
 }
 
 func (s *Server) dialStatus(ctx context.Context, backend Backend) (net.Conn, error) {
@@ -548,4 +564,30 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func classifyError(err error, phase string) string {
+	if err == nil {
+		return "none"
+	}
+	message := err.Error()
+	if errors.Is(err, errUnsupportedState) {
+		return "unsupported_state"
+	}
+	if strings.Contains(message, "backend dial") {
+		return "backend_dial_failed"
+	}
+	if strings.Contains(message, "backend replay") {
+		return "backend_replay_failed"
+	}
+	if phase == "status" && (strings.Contains(message, "status response") || strings.Contains(message, "backend unhealthy")) {
+		return "backend_status_failed"
+	}
+	if phase == "handshake" || strings.Contains(message, "status request") || strings.Contains(message, "login start") || strings.Contains(message, "bad packet") {
+		return "client_bad_packet"
+	}
+	if errors.Is(err, io.EOF) || strings.Contains(message, "broken pipe") || strings.Contains(message, "connection reset") {
+		return "client_io"
+	}
+	return "client_io"
 }

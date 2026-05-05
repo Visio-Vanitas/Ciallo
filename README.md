@@ -68,10 +68,14 @@ Important fields:
 - `routes[].hosts`: handshake host names routed to this backend.
 - `routes[].backend`: local Minecraft server address.
 - `default_backend`: fallback backend when no host route matches.
+- `max_handshake_size`: client handshake/status request/login start packet limit.
+- `max_status_response_size`: backend status response packet limit, default `262144`; raise it for modded servers with larger status payloads.
 - `status_cache.enabled`: global status response caching switch.
 - `status_cache.ttl`: short cache TTL, default `5s`.
 - `motd_cache.enabled`: enables MOTD fallback snapshots.
 - `motd_cache.fallback_ttl`: how long an expired MOTD snapshot can be used when a backend status query fails.
+- `status_fallback.version_name`: version name used in MOTD fallback responses.
+- `status_fallback.players_max`: max player count used in MOTD fallback responses.
 - `backend_health.enabled`: enables active MCJE status health checks. Enabled by default.
 - `backend_health.interval`: health check interval, default `10s`.
 - `backend_health.timeout`: per-check timeout, default `3s`.
@@ -81,7 +85,7 @@ Important fields:
 - `backend_health.probe_host`: optional fallback handshake host for health checks.
 - `backend_health.circuit_breaker_ttl`: status-path circuit breaker duration after threshold failures.
 - `backend_health.status_fallback_when_unhealthy`: when true, status requests use cached/MOTD fallback while a backend is unhealthy.
-- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.5.
+- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.6.
 - `fail2ban.max_failures`: failures within the window before a ban.
 - `fail2ban.window`: rolling window for login failures.
 - `fail2ban.ban_duration`: temporary ban duration.
@@ -109,7 +113,7 @@ logging:
     compress: true
 ```
 
-Status and login connections emit structured access logs with route, backend, protocol, duration, cache result, ping/pong handling, byte counts, fail2ban action, and error summary. Packet bodies, MOTD JSON, encryption data, and game traffic are not logged.
+Status and login connections emit structured access logs with route, backend, protocol, duration, cache result, ping/pong handling, byte counts, fail2ban action, `err_kind`, and error summary. Packet bodies, MOTD JSON, encryption data, and game traffic are not logged.
 
 Management endpoints are exposed only when `management.enabled` is true:
 
@@ -137,7 +141,9 @@ Vanilla online-mode authentication is performed by the backend server after the 
 
 Backend health checks use the same MCJE status path as the probe tool. When a backend is unhealthy, ciallo can short-circuit status requests to cached status or MOTD fallback, but login and play connections still attempt the backend normally.
 
-Fail2ban state is in memory for v0.0.5. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
+Only packets ciallo actively parses are size-limited by configuration. Login/play traffic after the plaintext prefix is copied as TCP bytes, so modded gameplay packets are not decoded or capped by the proxy.
+
+Fail2ban state is in memory for v0.0.6. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
 
 References:
 

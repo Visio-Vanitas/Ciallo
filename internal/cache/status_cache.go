@@ -78,6 +78,10 @@ func (c *StatusCache) SetWithFallback(key string, data []byte, ttl, fallbackTTL 
 }
 
 func (c *StatusCache) GetFallback(key string, protocolVersion int32) ([]byte, bool) {
+	return c.GetFallbackWithOptions(key, protocolVersion, mcproto.FallbackStatusOptions{})
+}
+
+func (c *StatusCache) GetFallbackWithOptions(key string, protocolVersion int32, options mcproto.FallbackStatusOptions) ([]byte, bool) {
 	c.mu.RLock()
 	item, ok := c.entries[key]
 	c.mu.RUnlock()
@@ -89,7 +93,7 @@ func (c *StatusCache) GetFallback(key string, protocolVersion int32) ([]byte, bo
 		}
 		return nil, false
 	}
-	p, err := mcproto.BuildFallbackStatus(protocolVersion, item.motd)
+	p, err := mcproto.BuildFallbackStatusWithOptions(protocolVersion, item.motd, options)
 	if err != nil {
 		return nil, false
 	}

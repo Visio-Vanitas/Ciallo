@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"time"
+
+	"ciallo/internal/mcproto"
 )
 
 type Backend struct {
@@ -32,7 +34,13 @@ type StatusDialer interface {
 type StatusCache interface {
 	Get(key string) ([]byte, bool)
 	GetFallback(key string, protocolVersion int32) ([]byte, bool)
+	GetFallbackWithOptions(key string, protocolVersion int32, options mcproto.FallbackStatusOptions) ([]byte, bool)
 	SetWithFallback(key string, data []byte, ttl, fallbackTTL time.Duration)
+}
+
+type FallbackStatusOptions struct {
+	VersionName string
+	PlayersMax  int
 }
 
 type FailGuard interface {
@@ -73,6 +81,7 @@ type Options struct {
 	IdleTimeout                 time.Duration
 	ShutdownTimeout             time.Duration
 	MaxHandshakeSize            int
+	MaxStatusResponseSize       int
 	StatusCacheEnabled          bool
 	StatusCacheTTL              time.Duration
 	MOTDCacheEnabled            bool
@@ -80,4 +89,5 @@ type Options struct {
 	Metrics                     MetricsRecorder
 	Health                      HealthChecker
 	StatusFallbackWhenUnhealthy bool
+	StatusFallback              FallbackStatusOptions
 }

@@ -19,6 +19,7 @@ type Options struct {
 	Port            uint16
 	ProtocolVersion int32
 	Timeout         time.Duration
+	MaxResponseSize int
 }
 
 type Result struct {
@@ -48,6 +49,9 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if options.Addr == "" {
 		options.Addr = net.JoinHostPort(options.Host, fmt.Sprintf("%d", options.Port))
 	}
+	if options.MaxResponseSize == 0 {
+		options.MaxResponseSize = mcproto.MaxPacketLength
+	}
 
 	start := time.Now()
 	var dialer net.Dialer
@@ -67,7 +71,7 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if err := mcproto.WritePacket(conn, mcproto.NewPacket(mcproto.StatusRequestPacketID, nil)); err != nil {
 		return Result{}, fmt.Errorf("write status request: %w", err)
 	}
-	response, err := mcproto.ReadPacket(conn, mcproto.MaxPacketLength)
+	response, err := mcproto.ReadPacket(conn, options.MaxResponseSize)
 	if err != nil {
 		return Result{}, fmt.Errorf("read status response: %w", err)
 	}

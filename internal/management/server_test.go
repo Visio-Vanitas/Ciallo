@@ -50,7 +50,7 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	rec := metrics.New()
 	rec.IncActiveConnections()
-	server := NewWithHealth(Options{Enabled: true, Address: addr, Version: "v0.0.5"}, guard, rec, readyFunc(func() bool { return true }), healthSource{snapshot: health.Snapshot{Enabled: true, Total: 1, Healthy: 1}}, logger)
+	server := NewWithHealth(Options{Enabled: true, Address: addr, Version: "v0.0.6"}, guard, rec, readyFunc(func() bool { return true }), healthSource{snapshot: health.Snapshot{Enabled: true, Total: 1, Healthy: 1}}, logger)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.ListenAndServe(ctx)
@@ -89,7 +89,7 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	if err := json.NewDecoder(readyResp.Body).Decode(&readyBody); err != nil {
 		t.Fatal(err)
 	}
-	if !readyBody.Ready || readyBody.Version != "v0.0.5" || !readyBody.Health.Enabled || readyBody.Health.Total != 1 || readyBody.Health.Healthy != 1 {
+	if !readyBody.Ready || readyBody.Version != "v0.0.6" || !readyBody.Health.Enabled || readyBody.Health.Total != 1 || readyBody.Health.Healthy != 1 {
 		t.Fatalf("ready body = %#v", readyBody)
 	}
 

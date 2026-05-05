@@ -22,7 +22,7 @@ import (
 	"ciallo/internal/proxy"
 )
 
-var version = "v0.0.5"
+var version = "v0.0.6"
 
 func main() {
 	configPath := flag.String("config", "configs/example.yaml", "path to YAML config")
@@ -52,6 +52,7 @@ func main() {
 		"listen", cfg.Listen,
 		"routes", len(cfg.Routes),
 		"default_backend", cfg.DefaultBackend,
+		"max_status_response_size", cfg.MaxStatusResponseSize,
 		"log_level", cfg.Logging.Level,
 		"log_format", cfg.Logging.Format,
 		"log_output", cfg.Logging.Output,
@@ -71,6 +72,7 @@ func main() {
 	router := proxy.NewStaticRouter(routes, defaultBackend)
 	statusCache := cache.NewStatusCache(time.Now)
 	metricsRecorder := metrics.New()
+	healthTargets := health.BuildTargets(routes, defaultBackend, cfg.BackendHealth.ProbeHost)
 	healthChecker := health.New(health.Options{
 		Enabled:           cfg.BackendHealth.Enabled,
 		Interval:          cfg.BackendHealth.Interval.Duration,
@@ -80,8 +82,14 @@ func main() {
 		ProbeProtocol:     cfg.BackendHealth.ProbeProtocol,
 		ProbeHost:         cfg.BackendHealth.ProbeHost,
 		CircuitBreakerTTL: cfg.BackendHealth.CircuitBreakerTTL.Duration,
-	}, health.BuildTargets(routes, defaultBackend, cfg.BackendHealth.ProbeHost), nil, logger)
+	}, healthTargets, nil, logger)
 	metricsRecorder.SetHealthSource(healthChecker)
+	for _, target := range healthTargets {
+		logger.Info("backend health target",
+			"backend", target.Backend.Addr,
+			"probe_host", target.ProbeHost,
+		)
+	}
 
 	var connPool *pool.Pool
 	if cfg.Pool.Enabled {
@@ -109,6 +117,7 @@ func main() {
 		IdleTimeout:                 cfg.Timeouts.Idle.Duration,
 		ShutdownTimeout:             cfg.Timeouts.Shutdown.Duration,
 		MaxHandshakeSize:            cfg.MaxHandshakeSize,
+		MaxStatusResponseSize:       cfg.MaxStatusResponseSize,
 		StatusCacheEnabled:          cfg.StatusCache.Enabled,
 		StatusCacheTTL:              cfg.StatusCache.TTL.Duration,
 		MOTDCacheEnabled:            cfg.MOTDCache.Enabled,
@@ -116,6 +125,10 @@ func main() {
 		Metrics:                     metricsRecorder,
 		Health:                      healthChecker,
 		StatusFallbackWhenUnhealthy: cfg.BackendHealth.StatusFallbackWhenUnhealthy,
+		StatusFallback: proxy.FallbackStatusOptions{
+			VersionName: cfg.StatusFallback.VersionName,
+			PlayersMax:  cfg.StatusFallback.PlayersMax,
+		},
 	}, router, dialer, statusCache, guard, logger)
 
 	mgmt := management.NewWithHealth(management.Options{

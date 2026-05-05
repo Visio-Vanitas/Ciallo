@@ -11,20 +11,23 @@ import (
 )
 
 const defaultMaxHandshakeSize = 64 * 1024
+const defaultMaxStatusResponseSize = 256 * 1024
 
 type Config struct {
-	Listen           string            `yaml:"listen"`
-	Timeouts         Timeouts          `yaml:"timeouts"`
-	StatusCache      StatusCacheConfig `yaml:"status_cache"`
-	MOTDCache        MOTDCacheConfig   `yaml:"motd_cache"`
-	BackendHealth    BackendHealth     `yaml:"backend_health"`
-	Fail2Ban         Fail2BanConfig    `yaml:"fail2ban"`
-	Management       ManagementConfig  `yaml:"management"`
-	Pool             PoolConfig        `yaml:"pool"`
-	Routes           []RouteConfig     `yaml:"routes"`
-	DefaultBackend   string            `yaml:"default_backend"`
-	Logging          LoggingConfig     `yaml:"logging"`
-	MaxHandshakeSize int               `yaml:"max_handshake_size"`
+	Listen                string            `yaml:"listen"`
+	Timeouts              Timeouts          `yaml:"timeouts"`
+	StatusCache           StatusCacheConfig `yaml:"status_cache"`
+	MOTDCache             MOTDCacheConfig   `yaml:"motd_cache"`
+	StatusFallback        StatusFallback    `yaml:"status_fallback"`
+	BackendHealth         BackendHealth     `yaml:"backend_health"`
+	Fail2Ban              Fail2BanConfig    `yaml:"fail2ban"`
+	Management            ManagementConfig  `yaml:"management"`
+	Pool                  PoolConfig        `yaml:"pool"`
+	Routes                []RouteConfig     `yaml:"routes"`
+	DefaultBackend        string            `yaml:"default_backend"`
+	Logging               LoggingConfig     `yaml:"logging"`
+	MaxHandshakeSize      int               `yaml:"max_handshake_size"`
+	MaxStatusResponseSize int               `yaml:"max_status_response_size"`
 }
 
 type Timeouts struct {
@@ -42,6 +45,11 @@ type StatusCacheConfig struct {
 type MOTDCacheConfig struct {
 	Enabled     bool     `yaml:"enabled"`
 	FallbackTTL Duration `yaml:"fallback_ttl"`
+}
+
+type StatusFallback struct {
+	VersionName string `yaml:"version_name"`
+	PlayersMax  int    `yaml:"players_max"`
 }
 
 type BackendHealth struct {
@@ -146,6 +154,10 @@ func Default() Config {
 			Enabled:     true,
 			FallbackTTL: Duration{5 * time.Minute},
 		},
+		StatusFallback: StatusFallback{
+			VersionName: "ciallo fallback",
+			PlayersMax:  0,
+		},
 		BackendHealth: BackendHealth{
 			Enabled:                     true,
 			Interval:                    Duration{10 * time.Second},
@@ -183,7 +195,8 @@ func Default() Config {
 				Compress:   true,
 			},
 		},
-		MaxHandshakeSize: defaultMaxHandshakeSize,
+		MaxHandshakeSize:      defaultMaxHandshakeSize,
+		MaxStatusResponseSize: defaultMaxStatusResponseSize,
 	}
 }
 
@@ -209,6 +222,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.MOTDCache.FallbackTTL.Duration == 0 {
 		c.MOTDCache.FallbackTTL = defaults.MOTDCache.FallbackTTL
+	}
+	if c.StatusFallback.VersionName == "" {
+		c.StatusFallback.VersionName = defaults.StatusFallback.VersionName
 	}
 	if c.BackendHealth.Interval.Duration == 0 {
 		c.BackendHealth.Interval = defaults.BackendHealth.Interval
@@ -270,6 +286,9 @@ func (c *Config) ApplyDefaults() {
 	if c.MaxHandshakeSize == 0 {
 		c.MaxHandshakeSize = defaults.MaxHandshakeSize
 	}
+	if c.MaxStatusResponseSize == 0 {
+		c.MaxStatusResponseSize = defaults.MaxStatusResponseSize
+	}
 }
 
 func (c Config) Validate() error {
@@ -305,6 +324,12 @@ func (c Config) Validate() error {
 	}
 	if c.MaxHandshakeSize <= 0 {
 		return errors.New("max_handshake_size must be positive")
+	}
+	if c.MaxStatusResponseSize <= 0 {
+		return errors.New("max_status_response_size must be positive")
+	}
+	if c.StatusFallback.PlayersMax < 0 {
+		return errors.New("status_fallback.players_max cannot be negative")
 	}
 	if err := validateBackendHealth(c.BackendHealth); err != nil {
 		return fmt.Errorf("backend_health: %w", err)
