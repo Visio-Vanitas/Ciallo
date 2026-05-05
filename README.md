@@ -14,6 +14,8 @@ The proxy deliberately parses only the initial plaintext handshake. Online-mode 
 - MOTD fallback for status responses when a backend is temporarily unavailable.
 - Experimental transparent fail2ban based on early login disconnect signals visible to the proxy.
 - Conservative pre-connection pool for status paths only.
+- Local management endpoints for health checks, readiness, Prometheus metrics, and fail2ban operations.
+- Standalone MCJE status probe tool for validating hostName routing.
 - YAML configuration.
 - MIT licensed.
 
@@ -29,6 +31,13 @@ Current test-build version:
 
 ```sh
 go run ./cmd/mcproxy -version
+```
+
+Probe a real entrypoint while sending a specific MCJE handshake host:
+
+```sh
+go run ./cmd/ciallo-probe -host atm10.atdove.dev -addr 58.32.35.194:25565
+go run ./cmd/ciallo-probe -host sos.atdove.dev -addr 10.10.3.1:31042 -json
 ```
 
 Example config:
@@ -62,7 +71,7 @@ Important fields:
 - `status_cache.ttl`: short cache TTL, default `5s`.
 - `motd_cache.enabled`: enables MOTD fallback snapshots.
 - `motd_cache.fallback_ttl`: how long an expired MOTD snapshot can be used when a backend status query fails.
-- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.3.
+- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.4.
 - `fail2ban.max_failures`: failures within the window before a ban.
 - `fail2ban.window`: rolling window for login failures.
 - `fail2ban.ban_duration`: temporary ban duration.
@@ -92,6 +101,13 @@ logging:
 
 Status and login connections emit structured access logs with route, backend, protocol, duration, cache result, ping/pong handling, byte counts, fail2ban action, and error summary. Packet bodies, MOTD JSON, encryption data, and game traffic are not logged.
 
+Management endpoints are exposed only when `management.enabled` is true:
+
+- `GET /healthz`: liveness, returns `204`.
+- `GET /readyz`: readiness JSON with version and proxy listener state.
+- `GET /metrics`: Prometheus text metrics for active connections, status/login totals, backend dial failures, and fail2ban blocks.
+- `GET /fail2ban/bans` and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` manage in-memory bans.
+
 ## Protocol Notes
 
 The first packet on a Minecraft Java Edition connection is an unencrypted handshake:
@@ -109,7 +125,7 @@ Next State VarInt
 
 Vanilla online-mode authentication is performed by the backend server after the login flow enters encryption. ciallo does not terminate encryption and cannot see the Mojang session verdict. The experimental fail2ban mechanism therefore uses a conservative transparent signal: repeated early login disconnects visible at the proxy, scoped by route plus IP or player name.
 
-Fail2ban state is in memory for v0.0.3. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
+Fail2ban state is in memory for v0.0.4. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
 
 References:
 

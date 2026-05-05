@@ -106,6 +106,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+func (s *Server) Ready() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ln != nil
+}
+
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	ln := s.ln
@@ -130,6 +136,10 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 	remoteAddr := client.RemoteAddr().String()
 	logger := s.logger.With("remote_addr", remoteAddr)
 	defer client.Close()
+	if s.options.Metrics != nil {
+		s.options.Metrics.IncActiveConnections()
+		defer s.options.Metrics.DecActiveConnections()
+	}
 
 	if tcp, ok := client.(*net.TCPConn); ok {
 		_ = tcp.SetKeepAlive(true)
@@ -167,6 +177,9 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 	switch handshake.NextState {
 	case mcproto.NextStateStatus:
 		result, err := s.handleStatus(parent, client, backend, handshake, handshakePacket, logger)
+		if s.options.Metrics != nil {
+			s.options.Metrics.RecordStatus(host, backend.Addr, result.CacheResult, result.FallbackUsed)
+		}
 		logger.Info("access",
 			"event", "status",
 			"duration_ms", time.Since(start).Milliseconds(),
@@ -180,6 +193,15 @@ func (s *Server) handleConn(parent context.Context, client net.Conn) {
 		}
 	case mcproto.NextStateLogin:
 		result, err := s.handleLogin(parent, client, backend, host, handshake, handshakePacket, remoteIP(client))
+		if s.options.Metrics != nil {
+			s.options.Metrics.RecordLogin(host, backend.Addr, result.Fail2BanAction)
+			if result.Fail2BanAction == "ip_banned" {
+				s.options.Metrics.RecordFail2BanBlock(host, "ip")
+			}
+			if result.Fail2BanAction == "player_banned" {
+				s.options.Metrics.RecordFail2BanBlock(host, "player")
+			}
+		}
 		logger.Info("access",
 			"event", "login",
 			"username", result.Username,
@@ -235,6 +257,7 @@ func (s *Server) handleLogin(parent context.Context, client net.Conn, backend Ba
 	loginObserved := time.Now()
 	backendConn, err := s.dialer.Dial(ctx, backend)
 	if err != nil {
+		s.recordBackendDialError(route, backend)
 		return result, err
 	}
 	if _, err := backendConn.Write(handshakePacket.Raw); err != nil {
@@ -301,6 +324,7 @@ func (s *Server) handleStatus(parent context.Context, client net.Conn, backend B
 	defer cancel()
 	backendConn, err := s.dialStatus(ctx, backend)
 	if err != nil {
+		s.recordBackendDialError(NormalizeHost(handshake.ServerAddress), backend)
 		if fallback, ok := s.statusFallback(cacheKey, handshake.ProtocolVersion, cacheEnabled); ok {
 			result.CacheResult = "fallback"
 			result.FallbackUsed = true
@@ -398,6 +422,12 @@ func (s *Server) recordLoginFailure(route, ip, username string) {
 	s.recordFailure(route, "ip", ip)
 	if username != "" {
 		s.recordFailure(route, "player", username)
+	}
+}
+
+func (s *Server) recordBackendDialError(route string, backend Backend) {
+	if s.options.Metrics != nil {
+		s.options.Metrics.RecordBackendDialError(route, backend.Addr)
 	}
 }
 

@@ -14,6 +14,8 @@
 - 后端临时不可用时，可用缓存的 MOTD 生成降级 status 响应。
 - 实验性透明 fail2ban，基于代理可见的早退登录断开信号。
 - 仅用于 status 路径的保守预连接池。
+- 本地管理端点，提供健康检查、就绪检查、Prometheus metrics 和 fail2ban 操作。
+- 独立 MCJE status 探测工具，用于验证 hostName 分流。
 - YAML 配置。
 - MIT 许可证。
 
@@ -29,6 +31,13 @@ go run ./cmd/mcproxy -config configs/example.yaml
 
 ```sh
 go run ./cmd/mcproxy -version
+```
+
+用指定 MCJE 握手主机名探测真实入口：
+
+```sh
+go run ./cmd/ciallo-probe -host atm10.atdove.dev -addr 58.32.35.194:25565
+go run ./cmd/ciallo-probe -host sos.atdove.dev -addr 10.10.3.1:31042 -json
 ```
 
 示例配置：
@@ -62,7 +71,7 @@ default_backend: "127.0.0.1:25566"
 - `status_cache.ttl`：短缓存 TTL，默认 `5s`。
 - `motd_cache.enabled`：启用 MOTD 降级快照。
 - `motd_cache.fallback_ttl`：后端 status 查询失败时，过期 MOTD 快照仍可被用于降级响应的时长。
-- `fail2ban.enabled`：启用实验性内存临时封禁。v0.0.3 默认关闭。
+- `fail2ban.enabled`：启用实验性内存临时封禁。v0.0.4 默认关闭。
 - `fail2ban.max_failures`：窗口期内触发封禁所需的失败次数。
 - `fail2ban.window`：登录失败统计窗口。
 - `fail2ban.ban_duration`：临时封禁时长。
@@ -92,6 +101,13 @@ logging:
 
 status 和 login 连接会输出结构化访问日志，包含路由、后端、协议版本、耗时、缓存结果、ping/pong 处理、字节数、fail2ban 动作和错误摘要。不会记录原始包内容、完整 MOTD JSON、加密数据或游戏流量。
 
+只有在 `management.enabled` 为 true 时才会暴露管理端点：
+
+- `GET /healthz`：存活检查，返回 `204`。
+- `GET /readyz`：就绪检查 JSON，包含版本和代理监听状态。
+- `GET /metrics`：Prometheus 文本指标，包含活跃连接、status/login 总数、后端拨号失败和 fail2ban 拦截。
+- `GET /fail2ban/bans` 与 `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>`：管理内存封禁。
+
 ## 协议说明
 
 Minecraft Java Edition 连接的第一个包是未加密握手：
@@ -109,7 +125,7 @@ Next State VarInt
 
 原版在线模式认证由后端服务器在登录流程进入加密后完成。ciallo 不终止加密，也无法看到 Mojang session 验证结果。因此实验性 fail2ban 使用一个保守的透明信号：代理可见的重复早退登录断开，并按路由加 IP 或玩家名进行隔离统计。
 
-v0.0.3 的 fail2ban 状态保存在内存中。启用本地管理服务后，`GET /fail2ban/bans` 可以列出当前封禁，`DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` 可以在不重启代理的情况下解除一条封禁。
+v0.0.4 的 fail2ban 状态保存在内存中。启用本地管理服务后，`GET /fail2ban/bans` 可以列出当前封禁，`DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` 可以在不重启代理的情况下解除一条封禁。
 
 参考资料：
 

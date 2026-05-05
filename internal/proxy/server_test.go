@@ -14,6 +14,7 @@ import (
 	"ciallo/internal/cache"
 	"ciallo/internal/fail2ban"
 	"ciallo/internal/mcproto"
+	"ciallo/internal/metrics"
 	"ciallo/internal/pool"
 )
 
@@ -119,13 +120,7 @@ func TestStatusAccessLogReportsCacheResult(t *testing.T) {
 	_ = dialStatus(t, addr, "status.example.com", 10)
 	_ = dialStatus(t, addr, "status.example.com", 20)
 
-	text := logs.String()
-	if !strings.Contains(text, "event=status") || !strings.Contains(text, "cache_result=miss") || !strings.Contains(text, "cache_result=hit") {
-		t.Fatalf("status access log missing cache results:\n%s", text)
-	}
-	if !strings.Contains(text, "pong_handled=true") {
-		t.Fatalf("status access log missing pong_handled=true:\n%s", text)
-	}
+	waitForLog(t, &logs, "event=status", "cache_result=miss", "cache_result=hit", "pong_handled=true")
 }
 
 func TestRouteCanDisableStatusCache(t *testing.T) {
@@ -145,6 +140,59 @@ func TestRouteCanDisableStatusCache(t *testing.T) {
 	if got := backend.count(); got != 2 {
 		t.Fatalf("backend status count = %d, want 2", got)
 	}
+}
+
+func TestMetricsRecordsStatusAndLoginEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rec := metrics.New()
+	statusBackend := startStatusBackend(t, `{"version":{"name":"test","protocol":765},"players":{"max":20,"online":1},"description":{"text":"cached"}}`)
+	server, statusAddr := startProxyWithOptions(t, ctx, []Route{
+		{Hosts: []string{"metrics-status.example.com"}, Backend: Backend{Name: "status", Addr: statusBackend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), nil, Options{
+		HandshakeTimeout:   time.Second,
+		BackendDialTimeout: time.Second,
+		IdleTimeout:        time.Second,
+		MaxHandshakeSize:   64 * 1024,
+		StatusCacheEnabled: true,
+		StatusCacheTTL:     time.Minute,
+		MOTDCacheEnabled:   true,
+		MOTDFallbackTTL:    time.Minute,
+		Metrics:            rec,
+	})
+	defer server.Shutdown(context.Background())
+	_ = dialStatus(t, statusAddr, "metrics-status.example.com", 10)
+
+	backend := startEarlyCloseBackend(t)
+	guard := fail2ban.New(fail2ban.Options{
+		Enabled:         true,
+		MaxFailures:     1,
+		Window:          time.Minute,
+		BanDuration:     time.Minute,
+		EarlyDisconnect: time.Minute,
+	}, time.Now)
+	loginServer, loginAddr := startProxyWithOptions(t, ctx, []Route{
+		{Hosts: []string{"metrics-login.example.com"}, Backend: Backend{Name: "login", Addr: backend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), guard, Options{
+		HandshakeTimeout:   time.Second,
+		BackendDialTimeout: time.Second,
+		IdleTimeout:        time.Second,
+		MaxHandshakeSize:   64 * 1024,
+		StatusCacheEnabled: true,
+		StatusCacheTTL:     time.Second,
+		Metrics:            rec,
+	})
+	defer loginServer.Shutdown(context.Background())
+	_ = dialLoginAllowEOF(t, loginAddr, "metrics-login.example.com", "Alex", []byte("payload"))
+	waitForBan(t, guard, "metrics-login.example.com", "ip", "127.0.0.1")
+
+	waitForMetrics(t, rec,
+		`ciallo_status_requests_total{route="metrics-status.example.com"`,
+		`cache_result="miss"`,
+		`ciallo_login_requests_total{route="metrics-login.example.com"`,
+		`fail2ban_action="record_failure"`,
+	)
 }
 
 func TestStatusUsesPoolButLoginDialsFresh(t *testing.T) {
@@ -301,10 +349,7 @@ func TestLoginAccessLogReportsFail2BanAction(t *testing.T) {
 	_ = dialLoginAllowEOF(t, addr, "ban.example.com", "Steve", []byte("payload"))
 	waitForBan(t, guard, "ban.example.com", "ip", "127.0.0.1")
 
-	text := logs.String()
-	if !strings.Contains(text, "event=login") || !strings.Contains(text, "username=Steve") || !strings.Contains(text, "fail2ban_action=record_failure") {
-		t.Fatalf("login access log missing fail2ban fields:\n%s", text)
-	}
+	waitForLog(t, &logs, "event=login", "username=Steve", "fail2ban_action=record_failure")
 }
 
 func TestFail2BanIsRouteScopedByHost(t *testing.T) {
@@ -521,6 +566,56 @@ func waitForBan(t *testing.T, guard *fail2ban.Guard, route, kind, value string) 
 		select {
 		case <-deadline:
 			t.Fatalf("timed out waiting for ban route=%s kind=%s value=%s", route, kind, value)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func waitForLog(t *testing.T, logs *bytes.Buffer, parts ...string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		text := logs.String()
+		missing := ""
+		for _, part := range parts {
+			if !strings.Contains(text, part) {
+				missing = part
+				break
+			}
+		}
+		if missing == "" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("log missing %q:\n%s", missing, text)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func waitForMetrics(t *testing.T, rec *metrics.Recorder, parts ...string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		var out strings.Builder
+		if err := rec.WritePrometheus(&out); err != nil {
+			t.Fatal(err)
+		}
+		text := out.String()
+		missing := ""
+		for _, part := range parts {
+			if !strings.Contains(text, part) {
+				missing = part
+				break
+			}
+		}
+		if missing == "" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("metrics missing %q:\n%s", missing, text)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

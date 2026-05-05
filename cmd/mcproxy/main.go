@@ -16,11 +16,12 @@ import (
 	"ciallo/internal/fail2ban"
 	"ciallo/internal/logging"
 	"ciallo/internal/management"
+	"ciallo/internal/metrics"
 	"ciallo/internal/pool"
 	"ciallo/internal/proxy"
 )
 
-var version = "v0.0.3"
+var version = "v0.0.4"
 
 func main() {
 	configPath := flag.String("config", "configs/example.yaml", "path to YAML config")
@@ -63,6 +64,7 @@ func main() {
 	routes := cfg.RouteBackends()
 	router := proxy.NewStaticRouter(routes, cfg.DefaultBackendConfig())
 	statusCache := cache.NewStatusCache(time.Now)
+	metricsRecorder := metrics.New()
 
 	var connPool *pool.Pool
 	if cfg.Pool.Enabled {
@@ -83,11 +85,6 @@ func main() {
 		BanDuration:     cfg.Fail2Ban.BanDuration.Duration,
 		EarlyDisconnect: cfg.Fail2Ban.EarlyDisconnect.Duration,
 	}, time.Now)
-	mgmt := management.New(management.Options{
-		Enabled: cfg.Management.Enabled,
-		Address: cfg.Management.Address,
-	}, guard, logger)
-
 	server := proxy.NewServerWithGuard(proxy.Options{
 		ListenAddr:         cfg.Listen,
 		HandshakeTimeout:   cfg.Timeouts.Handshake.Duration,
@@ -99,7 +96,14 @@ func main() {
 		StatusCacheTTL:     cfg.StatusCache.TTL.Duration,
 		MOTDCacheEnabled:   cfg.MOTDCache.Enabled,
 		MOTDFallbackTTL:    cfg.MOTDCache.FallbackTTL.Duration,
+		Metrics:            metricsRecorder,
 	}, router, dialer, statusCache, guard, logger)
+
+	mgmt := management.NewWithDependencies(management.Options{
+		Enabled: cfg.Management.Enabled,
+		Address: cfg.Management.Address,
+		Version: version,
+	}, guard, metricsRecorder, server, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

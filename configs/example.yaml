@@ -16,7 +16,7 @@ motd_cache:
   fallback_ttl: "5m"
 
 fail2ban:
-  # Experimental in v0.0.3. Disabled by default.
+  # Experimental in v0.0.4. Disabled by default.
   enabled: false
   max_failures: 5
   window: "1m"
@@ -24,7 +24,8 @@ fail2ban:
   early_disconnect: "5s"
 
 management:
-  # Local-only management surface for clearing in-memory fail2ban entries.
+  # Local-only management surface for health, readiness, metrics, and fail2ban operations.
+  # Endpoints: GET /healthz, GET /readyz, GET /metrics, GET/DELETE /fail2ban/bans.
   enabled: false
   address: "127.0.0.1:25575"
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,7 +13,12 @@ import (
 	"time"
 
 	"ciallo/internal/fail2ban"
+	"ciallo/internal/metrics"
 )
+
+type readyFunc func() bool
+
+func (f readyFunc) Ready() bool { return f() }
 
 func TestManagementListsAndDeletesBans(t *testing.T) {
 	guard := fail2ban.New(fail2ban.Options{
@@ -33,7 +39,9 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	server := New(Options{Enabled: true, Address: addr}, guard, logger)
+	rec := metrics.New()
+	rec.IncActiveConnections()
+	server := NewWithDependencies(Options{Enabled: true, Address: addr, Version: "v0.0.4"}, guard, rec, readyFunc(func() bool { return true }), logger)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.ListenAndServe(ctx)
@@ -51,6 +59,38 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	})
 
 	waitHTTP(t, "http://"+addr+"/healthz")
+
+	readyResp, err := http.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyResp.Body.Close()
+	if readyResp.StatusCode != http.StatusOK {
+		t.Fatalf("ready status = %d", readyResp.StatusCode)
+	}
+	var readyBody struct {
+		Ready   bool   `json:"ready"`
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(readyResp.Body).Decode(&readyBody); err != nil {
+		t.Fatal(err)
+	}
+	if !readyBody.Ready || readyBody.Version != "v0.0.4" {
+		t.Fatalf("ready body = %#v", readyBody)
+	}
+
+	metricsResp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metricsResp.Body.Close()
+	body, err := io.ReadAll(metricsResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metricsResp.StatusCode != http.StatusOK || !strings.Contains(string(body), "ciallo_active_connections 1") {
+		t.Fatalf("metrics response status=%d body=%s", metricsResp.StatusCode, body)
+	}
 
 	resp, err := http.Get("http://" + addr + "/fail2ban/bans")
 	if err != nil {
@@ -85,6 +125,44 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	text := logs.String()
 	if !strings.Contains(text, "event=management") || !strings.Contains(text, "method=GET") || !strings.Contains(text, "method=DELETE") || !strings.Contains(text, "status=200") {
 		t.Fatalf("management access logs missing fields:\n%s", text)
+	}
+}
+
+func TestReadyzReportsUnavailable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	server := NewWithDependencies(Options{Enabled: true, Address: addr}, nil, nil, readyFunc(func() bool { return false }), slog.Default())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("server error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("management server did not stop")
+		}
+	})
+
+	waitHTTP(t, "http://"+addr+"/healthz")
+	resp, err := http.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("ready status = %d", resp.StatusCode)
 	}
 }
 

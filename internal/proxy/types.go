@@ -44,6 +44,15 @@ type FailGuard interface {
 	Unban(route, kind, value string) bool
 }
 
+type MetricsRecorder interface {
+	IncActiveConnections()
+	DecActiveConnections()
+	RecordStatus(route, backend, cacheResult string, fallbackUsed bool)
+	RecordLogin(route, backend, fail2banAction string)
+	RecordBackendDialError(route, backend string)
+	RecordFail2BanBlock(route, kind string)
+}
+
 type Options struct {
 	ListenAddr         string
 	HandshakeTimeout   time.Duration
@@ -55,4 +64,5 @@ type Options struct {
 	StatusCacheTTL     time.Duration
 	MOTDCacheEnabled   bool
 	MOTDFallbackTTL    time.Duration
+	Metrics            MetricsRecorder
 }

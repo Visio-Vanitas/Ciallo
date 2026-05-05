@@ -3,6 +3,8 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,16 +16,35 @@ import (
 type Options struct {
 	Enabled bool
 	Address string
+	Version string
+}
+
+type MetricsWriter interface {
+	WritePrometheus(w io.Writer) error
+}
+
+type ReadinessChecker interface {
+	Ready() bool
 }
 
 type Server struct {
 	options Options
 	guard   *fail2ban.Guard
+	metrics MetricsWriter
+	ready   ReadinessChecker
 	logger  *slog.Logger
 	server  *http.Server
 }
 
 func New(options Options, guard *fail2ban.Guard, logger *slog.Logger) *Server {
+	return NewWithMetrics(options, guard, nil, logger)
+}
+
+func NewWithMetrics(options Options, guard *fail2ban.Guard, metrics MetricsWriter, logger *slog.Logger) *Server {
+	return NewWithDependencies(options, guard, metrics, nil, logger)
+}
+
+func NewWithDependencies(options Options, guard *fail2ban.Guard, metrics MetricsWriter, ready ReadinessChecker, logger *slog.Logger) *Server {
 	if options.Address == "" {
 		options.Address = "127.0.0.1:25575"
 	}
@@ -33,6 +54,8 @@ func New(options Options, guard *fail2ban.Guard, logger *slog.Logger) *Server {
 	return &Server{
 		options: options,
 		guard:   guard,
+		metrics: metrics,
+		ready:   ready,
 		logger:  logger,
 	}
 }
@@ -43,6 +66,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/readyz", s.handleReadyz)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/fail2ban/bans", s.handleBans)
 
 	server := &http.Server{
@@ -79,6 +104,45 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ready := true
+	if s.ready != nil {
+		ready = s.ready.Ready()
+	}
+	if !ready {
+		s.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ready":      false,
+			"management": true,
+			"version":    s.options.Version,
+		})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"ready":      true,
+		"management": true,
+		"version":    s.options.Version,
+	})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", fmt.Sprintf("text/plain; version=%s", versionOrDefault(s.options.Version)))
+	if s.metrics == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if err := s.metrics.WritePrometheus(w); err != nil {
+		s.logger.Error("write metrics failed", "err", err)
+	}
+}
+
 func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -96,6 +160,13 @@ func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func versionOrDefault(version string) string {
+	if version == "" {
+		return "0.0.4"
+	}
+	return version
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, value any) {
