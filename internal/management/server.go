@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ciallo/internal/fail2ban"
+	"ciallo/internal/health"
 )
 
 type Options struct {
@@ -27,11 +28,16 @@ type ReadinessChecker interface {
 	Ready() bool
 }
 
+type HealthSource interface {
+	Snapshot() health.Snapshot
+}
+
 type Server struct {
 	options Options
 	guard   *fail2ban.Guard
 	metrics MetricsWriter
 	ready   ReadinessChecker
+	health  HealthSource
 	logger  *slog.Logger
 	server  *http.Server
 }
@@ -45,6 +51,10 @@ func NewWithMetrics(options Options, guard *fail2ban.Guard, metrics MetricsWrite
 }
 
 func NewWithDependencies(options Options, guard *fail2ban.Guard, metrics MetricsWriter, ready ReadinessChecker, logger *slog.Logger) *Server {
+	return NewWithHealth(options, guard, metrics, ready, nil, logger)
+}
+
+func NewWithHealth(options Options, guard *fail2ban.Guard, metrics MetricsWriter, ready ReadinessChecker, health HealthSource, logger *slog.Logger) *Server {
 	if options.Address == "" {
 		options.Address = "127.0.0.1:25575"
 	}
@@ -56,6 +66,7 @@ func NewWithDependencies(options Options, guard *fail2ban.Guard, metrics Metrics
 		guard:   guard,
 		metrics: metrics,
 		ready:   ready,
+		health:  health,
 		logger:  logger,
 	}
 }
@@ -118,6 +129,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 			"ready":      false,
 			"management": true,
 			"version":    s.options.Version,
+			"health":     s.healthSnapshot(),
 		})
 		return
 	}
@@ -125,6 +137,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		"ready":      true,
 		"management": true,
 		"version":    s.options.Version,
+		"health":     s.healthSnapshot(),
 	})
 }
 
@@ -164,9 +177,16 @@ func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 
 func versionOrDefault(version string) string {
 	if version == "" {
-		return "0.0.4"
+		return "0.0.5"
 	}
 	return version
+}
+
+func (s *Server) healthSnapshot() any {
+	if s.health == nil {
+		return nil
+	}
+	return s.health.Snapshot()
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, value any) {

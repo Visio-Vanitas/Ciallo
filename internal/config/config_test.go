@@ -4,7 +4,24 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestBackendHealthDefaults(t *testing.T) {
+	cfg := Default()
+	if !cfg.BackendHealth.Enabled {
+		t.Fatal("backend health should default enabled")
+	}
+	if cfg.BackendHealth.Interval.Duration != 10*time.Second || cfg.BackendHealth.Timeout.Duration != 3*time.Second {
+		t.Fatalf("bad backend health durations: %+v", cfg.BackendHealth)
+	}
+	if cfg.BackendHealth.FailureThreshold != 2 || cfg.BackendHealth.SuccessThreshold != 1 {
+		t.Fatalf("bad thresholds: %+v", cfg.BackendHealth)
+	}
+	if cfg.BackendHealth.ProbeProtocol != 772 || !cfg.BackendHealth.StatusFallbackWhenUnhealthy {
+		t.Fatalf("bad probe/fallback defaults: %+v", cfg.BackendHealth)
+	}
+}
 
 func TestLoggingDefaults(t *testing.T) {
 	cfg := Default()

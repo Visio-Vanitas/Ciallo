@@ -13,12 +13,21 @@ import (
 	"time"
 
 	"ciallo/internal/fail2ban"
+	"ciallo/internal/health"
 	"ciallo/internal/metrics"
 )
 
 type readyFunc func() bool
 
 func (f readyFunc) Ready() bool { return f() }
+
+type healthSource struct {
+	snapshot health.Snapshot
+}
+
+func (h healthSource) Snapshot() health.Snapshot {
+	return h.snapshot
+}
 
 func TestManagementListsAndDeletesBans(t *testing.T) {
 	guard := fail2ban.New(fail2ban.Options{
@@ -41,7 +50,7 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	rec := metrics.New()
 	rec.IncActiveConnections()
-	server := NewWithDependencies(Options{Enabled: true, Address: addr, Version: "v0.0.4"}, guard, rec, readyFunc(func() bool { return true }), logger)
+	server := NewWithHealth(Options{Enabled: true, Address: addr, Version: "v0.0.5"}, guard, rec, readyFunc(func() bool { return true }), healthSource{snapshot: health.Snapshot{Enabled: true, Total: 1, Healthy: 1}}, logger)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.ListenAndServe(ctx)
@@ -71,11 +80,16 @@ func TestManagementListsAndDeletesBans(t *testing.T) {
 	var readyBody struct {
 		Ready   bool   `json:"ready"`
 		Version string `json:"version"`
+		Health  struct {
+			Enabled bool `json:"enabled"`
+			Total   int  `json:"total"`
+			Healthy int  `json:"healthy"`
+		} `json:"health"`
 	}
 	if err := json.NewDecoder(readyResp.Body).Decode(&readyBody); err != nil {
 		t.Fatal(err)
 	}
-	if !readyBody.Ready || readyBody.Version != "v0.0.4" {
+	if !readyBody.Ready || readyBody.Version != "v0.0.5" || !readyBody.Health.Enabled || readyBody.Health.Total != 1 || readyBody.Health.Healthy != 1 {
 		t.Fatalf("ready body = %#v", readyBody)
 	}
 

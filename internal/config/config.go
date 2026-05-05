@@ -17,6 +17,7 @@ type Config struct {
 	Timeouts         Timeouts          `yaml:"timeouts"`
 	StatusCache      StatusCacheConfig `yaml:"status_cache"`
 	MOTDCache        MOTDCacheConfig   `yaml:"motd_cache"`
+	BackendHealth    BackendHealth     `yaml:"backend_health"`
 	Fail2Ban         Fail2BanConfig    `yaml:"fail2ban"`
 	Management       ManagementConfig  `yaml:"management"`
 	Pool             PoolConfig        `yaml:"pool"`
@@ -41,6 +42,18 @@ type StatusCacheConfig struct {
 type MOTDCacheConfig struct {
 	Enabled     bool     `yaml:"enabled"`
 	FallbackTTL Duration `yaml:"fallback_ttl"`
+}
+
+type BackendHealth struct {
+	Enabled                     bool     `yaml:"enabled"`
+	Interval                    Duration `yaml:"interval"`
+	Timeout                     Duration `yaml:"timeout"`
+	FailureThreshold            int      `yaml:"failure_threshold"`
+	SuccessThreshold            int      `yaml:"success_threshold"`
+	ProbeProtocol               int32    `yaml:"probe_protocol"`
+	ProbeHost                   string   `yaml:"probe_host"`
+	CircuitBreakerTTL           Duration `yaml:"circuit_breaker_ttl"`
+	StatusFallbackWhenUnhealthy bool     `yaml:"status_fallback_when_unhealthy"`
 }
 
 type Fail2BanConfig struct {
@@ -133,6 +146,16 @@ func Default() Config {
 			Enabled:     true,
 			FallbackTTL: Duration{5 * time.Minute},
 		},
+		BackendHealth: BackendHealth{
+			Enabled:                     true,
+			Interval:                    Duration{10 * time.Second},
+			Timeout:                     Duration{3 * time.Second},
+			FailureThreshold:            2,
+			SuccessThreshold:            1,
+			ProbeProtocol:               772,
+			CircuitBreakerTTL:           Duration{30 * time.Second},
+			StatusFallbackWhenUnhealthy: true,
+		},
 		Fail2Ban: Fail2BanConfig{
 			Enabled:         false,
 			MaxFailures:     5,
@@ -186,6 +209,24 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.MOTDCache.FallbackTTL.Duration == 0 {
 		c.MOTDCache.FallbackTTL = defaults.MOTDCache.FallbackTTL
+	}
+	if c.BackendHealth.Interval.Duration == 0 {
+		c.BackendHealth.Interval = defaults.BackendHealth.Interval
+	}
+	if c.BackendHealth.Timeout.Duration == 0 {
+		c.BackendHealth.Timeout = defaults.BackendHealth.Timeout
+	}
+	if c.BackendHealth.FailureThreshold == 0 {
+		c.BackendHealth.FailureThreshold = defaults.BackendHealth.FailureThreshold
+	}
+	if c.BackendHealth.SuccessThreshold == 0 {
+		c.BackendHealth.SuccessThreshold = defaults.BackendHealth.SuccessThreshold
+	}
+	if c.BackendHealth.ProbeProtocol == 0 {
+		c.BackendHealth.ProbeProtocol = defaults.BackendHealth.ProbeProtocol
+	}
+	if c.BackendHealth.CircuitBreakerTTL.Duration == 0 {
+		c.BackendHealth.CircuitBreakerTTL = defaults.BackendHealth.CircuitBreakerTTL
 	}
 	if c.Fail2Ban.MaxFailures == 0 {
 		c.Fail2Ban.MaxFailures = defaults.Fail2Ban.MaxFailures
@@ -265,8 +306,33 @@ func (c Config) Validate() error {
 	if c.MaxHandshakeSize <= 0 {
 		return errors.New("max_handshake_size must be positive")
 	}
+	if err := validateBackendHealth(c.BackendHealth); err != nil {
+		return fmt.Errorf("backend_health: %w", err)
+	}
 	if err := validateLogging(c.Logging); err != nil {
 		return fmt.Errorf("logging: %w", err)
+	}
+	return nil
+}
+
+func validateBackendHealth(health BackendHealth) error {
+	if health.Interval.Duration <= 0 {
+		return errors.New("interval must be positive")
+	}
+	if health.Timeout.Duration <= 0 {
+		return errors.New("timeout must be positive")
+	}
+	if health.FailureThreshold <= 0 {
+		return errors.New("failure_threshold must be positive")
+	}
+	if health.SuccessThreshold <= 0 {
+		return errors.New("success_threshold must be positive")
+	}
+	if health.ProbeProtocol <= 0 {
+		return errors.New("probe_protocol must be positive")
+	}
+	if health.CircuitBreakerTTL.Duration <= 0 {
+		return errors.New("circuit_breaker_ttl must be positive")
 	}
 	return nil
 }

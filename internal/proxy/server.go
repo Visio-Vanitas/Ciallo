@@ -320,11 +320,29 @@ func (s *Server) handleStatus(parent context.Context, client net.Conn, backend B
 	}
 	logger.Debug("status cache miss")
 
+	if s.options.StatusFallbackWhenUnhealthy && s.options.Health != nil && s.options.Health.Unhealthy(backend) {
+		if s.options.Metrics != nil {
+			s.options.Metrics.RecordStatusCircuitBreaker(backend.Addr)
+		}
+		if fallback, ok := s.statusFallback(cacheKey, handshake.ProtocolVersion, cacheEnabled); ok {
+			result.CacheResult = "fallback"
+			result.FallbackUsed = true
+			logger.Debug("status fallback hit for unhealthy backend")
+			if _, writeErr := client.Write(fallback); writeErr != nil {
+				return result, writeErr
+			}
+			result.PongHandled, err = s.handleCachedPing(client)
+			return result, err
+		}
+		return result, fmt.Errorf("backend unhealthy and no status fallback available")
+	}
+
 	ctx, cancel := context.WithTimeout(parent, s.options.BackendDialTimeout)
 	defer cancel()
 	backendConn, err := s.dialStatus(ctx, backend)
 	if err != nil {
 		s.recordBackendDialError(NormalizeHost(handshake.ServerAddress), backend)
+		s.recordBackendHealthFailure(backend, err)
 		if fallback, ok := s.statusFallback(cacheKey, handshake.ProtocolVersion, cacheEnabled); ok {
 			result.CacheResult = "fallback"
 			result.FallbackUsed = true
@@ -342,13 +360,16 @@ func (s *Server) handleStatus(parent context.Context, client net.Conn, backend B
 	defer backendConn.SetDeadline(time.Time{})
 
 	if _, err := backendConn.Write(handshakePacket.Raw); err != nil {
+		s.recordBackendHealthFailure(backend, err)
 		return result, err
 	}
 	if _, err := backendConn.Write(statusRequest.Raw); err != nil {
+		s.recordBackendHealthFailure(backend, err)
 		return result, err
 	}
 	response, err := mcproto.ReadPacket(backendConn, mcproto.MaxPacketLength)
 	if err != nil {
+		s.recordBackendHealthFailure(backend, err)
 		if fallback, ok := s.statusFallback(cacheKey, handshake.ProtocolVersion, cacheEnabled); ok {
 			result.CacheResult = "fallback"
 			result.FallbackUsed = true
@@ -362,8 +383,11 @@ func (s *Server) handleStatus(parent context.Context, client net.Conn, backend B
 		return result, fmt.Errorf("read status response: %w", err)
 	}
 	if response.ID != mcproto.StatusResponsePacketID {
+		statusErr := fmt.Errorf("unexpected status response packet id 0x%x", response.ID)
+		s.recordBackendHealthFailure(backend, statusErr)
 		return result, fmt.Errorf("unexpected status response packet id 0x%x", response.ID)
 	}
+	s.recordBackendHealthSuccess(backend)
 	if _, err := client.Write(response.Raw); err != nil {
 		return result, err
 	}
@@ -428,6 +452,18 @@ func (s *Server) recordLoginFailure(route, ip, username string) {
 func (s *Server) recordBackendDialError(route string, backend Backend) {
 	if s.options.Metrics != nil {
 		s.options.Metrics.RecordBackendDialError(route, backend.Addr)
+	}
+}
+
+func (s *Server) recordBackendHealthFailure(backend Backend, err error) {
+	if s.options.Health != nil {
+		s.options.Health.RecordFailure(backend.Addr, err)
+	}
+}
+
+func (s *Server) recordBackendHealthSuccess(backend Backend) {
+	if s.options.Health != nil {
+		s.options.Health.RecordSuccess(backend.Addr)
 	}
 }
 

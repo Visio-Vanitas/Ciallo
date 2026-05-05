@@ -12,6 +12,7 @@
 - 登录和游玩连接使用透明 TCP 转发。
 - 服务器列表 status 响应短 TTL 缓存。
 - 后端临时不可用时，可用缓存的 MOTD 生成降级 status 响应。
+- 主动 MCJE status 后端健康检查，以及仅影响 status 路径的短熔断。
 - 实验性透明 fail2ban，基于代理可见的早退登录断开信号。
 - 仅用于 status 路径的保守预连接池。
 - 本地管理端点，提供健康检查、就绪检查、Prometheus metrics 和 fail2ban 操作。
@@ -71,7 +72,16 @@ default_backend: "127.0.0.1:25566"
 - `status_cache.ttl`：短缓存 TTL，默认 `5s`。
 - `motd_cache.enabled`：启用 MOTD 降级快照。
 - `motd_cache.fallback_ttl`：后端 status 查询失败时，过期 MOTD 快照仍可被用于降级响应的时长。
-- `fail2ban.enabled`：启用实验性内存临时封禁。v0.0.4 默认关闭。
+- `backend_health.enabled`：启用主动 MCJE status 健康检查，默认开启。
+- `backend_health.interval`：健康检查间隔，默认 `10s`。
+- `backend_health.timeout`：单次检查超时，默认 `3s`。
+- `backend_health.failure_threshold`：连续失败多少次后标记后端不健康。
+- `backend_health.success_threshold`：连续成功多少次后恢复健康。
+- `backend_health.probe_protocol`：健康检查使用的 MCJE 协议版本，默认 `772`。
+- `backend_health.probe_host`：健康检查使用的可选默认握手主机名。
+- `backend_health.circuit_breaker_ttl`：达到失败阈值后 status 路径短熔断时长。
+- `backend_health.status_fallback_when_unhealthy`：为 true 时，不健康后端的 status 请求优先使用缓存/MOTD 降级。
+- `fail2ban.enabled`：启用实验性内存临时封禁。v0.0.5 默认关闭。
 - `fail2ban.max_failures`：窗口期内触发封禁所需的失败次数。
 - `fail2ban.window`：登录失败统计窗口。
 - `fail2ban.ban_duration`：临时封禁时长。
@@ -105,7 +115,7 @@ status 和 login 连接会输出结构化访问日志，包含路由、后端、
 
 - `GET /healthz`：存活检查，返回 `204`。
 - `GET /readyz`：就绪检查 JSON，包含版本和代理监听状态。
-- `GET /metrics`：Prometheus 文本指标，包含活跃连接、status/login 总数、后端拨号失败和 fail2ban 拦截。
+- `GET /metrics`：Prometheus 文本指标，包含活跃连接、status/login 总数、后端拨号失败、fail2ban 拦截、后端健康和 status 熔断。
 - `GET /fail2ban/bans` 与 `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>`：管理内存封禁。
 
 ## 协议说明
@@ -125,7 +135,9 @@ Next State VarInt
 
 原版在线模式认证由后端服务器在登录流程进入加密后完成。ciallo 不终止加密，也无法看到 Mojang session 验证结果。因此实验性 fail2ban 使用一个保守的透明信号：代理可见的重复早退登录断开，并按路由加 IP 或玩家名进行隔离统计。
 
-v0.0.4 的 fail2ban 状态保存在内存中。启用本地管理服务后，`GET /fail2ban/bans` 可以列出当前封禁，`DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` 可以在不重启代理的情况下解除一条封禁。
+后端健康检查使用和探测工具一致的 MCJE status 路径。当后端不健康时，ciallo 可以把 status 请求短路到缓存 status 或 MOTD 降级响应，但 login 和 play 连接仍会正常尝试后端，避免误判阻止玩家登录。
+
+v0.0.5 的 fail2ban 状态保存在内存中。启用本地管理服务后，`GET /fail2ban/bans` 可以列出当前封禁，`DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` 可以在不重启代理的情况下解除一条封禁。
 
 参考资料：
 

@@ -253,6 +253,71 @@ func TestStatusMOTDFallback(t *testing.T) {
 	}
 }
 
+func TestStatusUsesFallbackWhenBackendUnhealthy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	now := time.Unix(100, 0)
+	statusCache := cache.NewStatusCache(func() time.Time { return now })
+	status := mcproto.BuildStatusResponse(`{"version":{"name":"test","protocol":765},"players":{"max":20,"online":1},"description":{"text":"breaker motd"}}`)
+	statusCache.SetWithFallback("127.0.0.1:1|status.example.com|765", status.Raw, time.Second, time.Minute)
+	now = now.Add(2 * time.Second)
+
+	rec := metrics.New()
+	guard := &stubHealth{unhealthy: true}
+	server, addr := startProxyWithOptions(t, ctx, []Route{
+		{Hosts: []string{"status.example.com"}, Backend: Backend{Name: "127.0.0.1:1", Addr: "127.0.0.1:1"}},
+	}, nil, NewNetDialer(time.Second, nil), statusCache, nil, Options{
+		HandshakeTimeout:            time.Second,
+		BackendDialTimeout:          time.Second,
+		IdleTimeout:                 time.Second,
+		MaxHandshakeSize:            64 * 1024,
+		StatusCacheEnabled:          true,
+		StatusCacheTTL:              time.Second,
+		MOTDCacheEnabled:            true,
+		MOTDFallbackTTL:             time.Minute,
+		Metrics:                     rec,
+		Health:                      guard,
+		StatusFallbackWhenUnhealthy: true,
+	})
+	defer server.Shutdown(context.Background())
+
+	result := dialStatus(t, addr, "status.example.com", 42)
+	if !strings.Contains(result.statusJSON, "breaker motd") {
+		t.Fatalf("fallback response missing motd: %s", result.statusJSON)
+	}
+	if guard.failures != 0 {
+		t.Fatalf("unhealthy fallback should not dial backend, failures = %d", guard.failures)
+	}
+	waitForMetrics(t, rec, `ciallo_status_circuit_breaker_total{backend="127.0.0.1:1"} 1`)
+}
+
+func TestLoginStillDialsWhenBackendUnhealthy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend := startEarlyCloseBackend(t)
+	guard := &stubHealth{unhealthy: true}
+	server, addr := startProxyWithOptions(t, ctx, []Route{
+		{Hosts: []string{"login.example.com"}, Backend: Backend{Name: "login", Addr: backend.addr}},
+	}, nil, NewNetDialer(time.Second, nil), cache.NewStatusCache(time.Now), nil, Options{
+		HandshakeTimeout:            time.Second,
+		BackendDialTimeout:          time.Second,
+		IdleTimeout:                 time.Second,
+		MaxHandshakeSize:            64 * 1024,
+		StatusCacheEnabled:          true,
+		StatusCacheTTL:              time.Second,
+		Health:                      guard,
+		StatusFallbackWhenUnhealthy: true,
+	})
+	defer server.Shutdown(context.Background())
+
+	_ = dialLoginAllowEOF(t, addr, "login.example.com", "Alex", []byte("payload"))
+	if got := backend.count(); got != 1 {
+		t.Fatalf("login should still reach backend, count = %d", got)
+	}
+}
+
 func TestFail2BanBansIPAfterEarlyDisconnects(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -619,6 +684,28 @@ func waitForMetrics(t *testing.T, rec *metrics.Recorder, parts ...string) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+type stubHealth struct {
+	unhealthy bool
+	failures  int
+	successes int
+}
+
+func (h *stubHealth) Unhealthy(Backend) bool {
+	return h.unhealthy
+}
+
+func (h *stubHealth) Status(Backend) HealthStatus {
+	return HealthStatus{Healthy: !h.unhealthy, CircuitOpen: h.unhealthy}
+}
+
+func (h *stubHealth) RecordFailure(string, error) {
+	h.failures++
+}
+
+func (h *stubHealth) RecordSuccess(string) {
+	h.successes++
 }
 
 type statusBackend struct {

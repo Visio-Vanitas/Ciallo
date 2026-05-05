@@ -14,6 +14,7 @@ import (
 	"ciallo/internal/cache"
 	"ciallo/internal/config"
 	"ciallo/internal/fail2ban"
+	"ciallo/internal/health"
 	"ciallo/internal/logging"
 	"ciallo/internal/management"
 	"ciallo/internal/metrics"
@@ -21,7 +22,7 @@ import (
 	"ciallo/internal/proxy"
 )
 
-var version = "v0.0.4"
+var version = "v0.0.5"
 
 func main() {
 	configPath := flag.String("config", "configs/example.yaml", "path to YAML config")
@@ -56,15 +57,31 @@ func main() {
 		"log_output", cfg.Logging.Output,
 		"status_cache_enabled", cfg.StatusCache.Enabled,
 		"motd_cache_enabled", cfg.MOTDCache.Enabled,
+		"backend_health_enabled", cfg.BackendHealth.Enabled,
+		"backend_health_interval", cfg.BackendHealth.Interval.Duration,
+		"backend_health_failure_threshold", cfg.BackendHealth.FailureThreshold,
+		"backend_health_circuit_breaker_ttl", cfg.BackendHealth.CircuitBreakerTTL.Duration,
 		"fail2ban_enabled", cfg.Fail2Ban.Enabled,
 		"management_enabled", cfg.Management.Enabled,
 		"pool_enabled", cfg.Pool.Enabled,
 	)
 
 	routes := cfg.RouteBackends()
-	router := proxy.NewStaticRouter(routes, cfg.DefaultBackendConfig())
+	defaultBackend := cfg.DefaultBackendConfig()
+	router := proxy.NewStaticRouter(routes, defaultBackend)
 	statusCache := cache.NewStatusCache(time.Now)
 	metricsRecorder := metrics.New()
+	healthChecker := health.New(health.Options{
+		Enabled:           cfg.BackendHealth.Enabled,
+		Interval:          cfg.BackendHealth.Interval.Duration,
+		Timeout:           cfg.BackendHealth.Timeout.Duration,
+		FailureThreshold:  cfg.BackendHealth.FailureThreshold,
+		SuccessThreshold:  cfg.BackendHealth.SuccessThreshold,
+		ProbeProtocol:     cfg.BackendHealth.ProbeProtocol,
+		ProbeHost:         cfg.BackendHealth.ProbeHost,
+		CircuitBreakerTTL: cfg.BackendHealth.CircuitBreakerTTL.Duration,
+	}, health.BuildTargets(routes, defaultBackend, cfg.BackendHealth.ProbeHost), nil, logger)
+	metricsRecorder.SetHealthSource(healthChecker)
 
 	var connPool *pool.Pool
 	if cfg.Pool.Enabled {
@@ -86,24 +103,26 @@ func main() {
 		EarlyDisconnect: cfg.Fail2Ban.EarlyDisconnect.Duration,
 	}, time.Now)
 	server := proxy.NewServerWithGuard(proxy.Options{
-		ListenAddr:         cfg.Listen,
-		HandshakeTimeout:   cfg.Timeouts.Handshake.Duration,
-		BackendDialTimeout: cfg.Timeouts.BackendDial.Duration,
-		IdleTimeout:        cfg.Timeouts.Idle.Duration,
-		ShutdownTimeout:    cfg.Timeouts.Shutdown.Duration,
-		MaxHandshakeSize:   cfg.MaxHandshakeSize,
-		StatusCacheEnabled: cfg.StatusCache.Enabled,
-		StatusCacheTTL:     cfg.StatusCache.TTL.Duration,
-		MOTDCacheEnabled:   cfg.MOTDCache.Enabled,
-		MOTDFallbackTTL:    cfg.MOTDCache.FallbackTTL.Duration,
-		Metrics:            metricsRecorder,
+		ListenAddr:                  cfg.Listen,
+		HandshakeTimeout:            cfg.Timeouts.Handshake.Duration,
+		BackendDialTimeout:          cfg.Timeouts.BackendDial.Duration,
+		IdleTimeout:                 cfg.Timeouts.Idle.Duration,
+		ShutdownTimeout:             cfg.Timeouts.Shutdown.Duration,
+		MaxHandshakeSize:            cfg.MaxHandshakeSize,
+		StatusCacheEnabled:          cfg.StatusCache.Enabled,
+		StatusCacheTTL:              cfg.StatusCache.TTL.Duration,
+		MOTDCacheEnabled:            cfg.MOTDCache.Enabled,
+		MOTDFallbackTTL:             cfg.MOTDCache.FallbackTTL.Duration,
+		Metrics:                     metricsRecorder,
+		Health:                      healthChecker,
+		StatusFallbackWhenUnhealthy: cfg.BackendHealth.StatusFallbackWhenUnhealthy,
 	}, router, dialer, statusCache, guard, logger)
 
-	mgmt := management.NewWithDependencies(management.Options{
+	mgmt := management.NewWithHealth(management.Options{
 		Enabled: cfg.Management.Enabled,
 		Address: cfg.Management.Address,
 		Version: version,
-	}, guard, metricsRecorder, server, logger)
+	}, guard, metricsRecorder, server, healthChecker, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -112,6 +131,7 @@ func main() {
 	go func() {
 		errCh <- server.ListenAndServe(ctx)
 	}()
+	go healthChecker.Run(ctx)
 	if cfg.Management.Enabled {
 		go func() {
 			if err := mgmt.ListenAndServe(ctx); err != nil && !errors.Is(err, context.Canceled) {

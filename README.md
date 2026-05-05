@@ -12,6 +12,7 @@ The proxy deliberately parses only the initial plaintext handshake. Online-mode 
 - Transparent TCP forwarding for login and play connections.
 - Short-TTL cache for server list status responses.
 - MOTD fallback for status responses when a backend is temporarily unavailable.
+- Active backend status health checks with short status-path circuit breaking.
 - Experimental transparent fail2ban based on early login disconnect signals visible to the proxy.
 - Conservative pre-connection pool for status paths only.
 - Local management endpoints for health checks, readiness, Prometheus metrics, and fail2ban operations.
@@ -71,7 +72,16 @@ Important fields:
 - `status_cache.ttl`: short cache TTL, default `5s`.
 - `motd_cache.enabled`: enables MOTD fallback snapshots.
 - `motd_cache.fallback_ttl`: how long an expired MOTD snapshot can be used when a backend status query fails.
-- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.4.
+- `backend_health.enabled`: enables active MCJE status health checks. Enabled by default.
+- `backend_health.interval`: health check interval, default `10s`.
+- `backend_health.timeout`: per-check timeout, default `3s`.
+- `backend_health.failure_threshold`: failed checks before marking a backend unhealthy.
+- `backend_health.success_threshold`: successful checks before recovering a backend.
+- `backend_health.probe_protocol`: MCJE protocol version for health checks, default `772`.
+- `backend_health.probe_host`: optional fallback handshake host for health checks.
+- `backend_health.circuit_breaker_ttl`: status-path circuit breaker duration after threshold failures.
+- `backend_health.status_fallback_when_unhealthy`: when true, status requests use cached/MOTD fallback while a backend is unhealthy.
+- `fail2ban.enabled`: enables experimental in-memory temporary bans. It is disabled by default in v0.0.5.
 - `fail2ban.max_failures`: failures within the window before a ban.
 - `fail2ban.window`: rolling window for login failures.
 - `fail2ban.ban_duration`: temporary ban duration.
@@ -105,7 +115,7 @@ Management endpoints are exposed only when `management.enabled` is true:
 
 - `GET /healthz`: liveness, returns `204`.
 - `GET /readyz`: readiness JSON with version and proxy listener state.
-- `GET /metrics`: Prometheus text metrics for active connections, status/login totals, backend dial failures, and fail2ban blocks.
+- `GET /metrics`: Prometheus text metrics for active connections, status/login totals, backend dial failures, fail2ban blocks, backend health, and status circuit breakers.
 - `GET /fail2ban/bans` and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` manage in-memory bans.
 
 ## Protocol Notes
@@ -125,7 +135,9 @@ Next State VarInt
 
 Vanilla online-mode authentication is performed by the backend server after the login flow enters encryption. ciallo does not terminate encryption and cannot see the Mojang session verdict. The experimental fail2ban mechanism therefore uses a conservative transparent signal: repeated early login disconnects visible at the proxy, scoped by route plus IP or player name.
 
-Fail2ban state is in memory for v0.0.4. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
+Backend health checks use the same MCJE status path as the probe tool. When a backend is unhealthy, ciallo can short-circuit status requests to cached status or MOTD fallback, but login and play connections still attempt the backend normally.
+
+Fail2ban state is in memory for v0.0.5. When the local management server is enabled, `GET /fail2ban/bans` lists active bans and `DELETE /fail2ban/bans?route=<route>&kind=<ip|player>&value=<value>` clears one without a restart.
 
 References:
 

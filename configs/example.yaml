@@ -15,8 +15,19 @@ motd_cache:
   enabled: true
   fallback_ttl: "5m"
 
+backend_health:
+  enabled: true
+  interval: "10s"
+  timeout: "3s"
+  failure_threshold: 2
+  success_threshold: 1
+  probe_protocol: 772
+  probe_host: ""
+  circuit_breaker_ttl: "30s"
+  status_fallback_when_unhealthy: true
+
 fail2ban:
-  # Experimental in v0.0.4. Disabled by default.
+  # Experimental in v0.0.5. Disabled by default.
   enabled: false
   max_failures: 5
   window: "1m"

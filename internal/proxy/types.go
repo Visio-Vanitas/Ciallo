@@ -51,18 +51,33 @@ type MetricsRecorder interface {
 	RecordLogin(route, backend, fail2banAction string)
 	RecordBackendDialError(route, backend string)
 	RecordFail2BanBlock(route, kind string)
+	RecordStatusCircuitBreaker(backend string)
+}
+
+type HealthStatus struct {
+	Healthy     bool
+	CircuitOpen bool
+}
+
+type HealthChecker interface {
+	Unhealthy(backend Backend) bool
+	Status(backend Backend) HealthStatus
+	RecordFailure(backend string, err error)
+	RecordSuccess(backend string)
 }
 
 type Options struct {
-	ListenAddr         string
-	HandshakeTimeout   time.Duration
-	BackendDialTimeout time.Duration
-	IdleTimeout        time.Duration
-	ShutdownTimeout    time.Duration
-	MaxHandshakeSize   int
-	StatusCacheEnabled bool
-	StatusCacheTTL     time.Duration
-	MOTDCacheEnabled   bool
-	MOTDFallbackTTL    time.Duration
-	Metrics            MetricsRecorder
+	ListenAddr                  string
+	HandshakeTimeout            time.Duration
+	BackendDialTimeout          time.Duration
+	IdleTimeout                 time.Duration
+	ShutdownTimeout             time.Duration
+	MaxHandshakeSize            int
+	StatusCacheEnabled          bool
+	StatusCacheTTL              time.Duration
+	MOTDCacheEnabled            bool
+	MOTDFallbackTTL             time.Duration
+	Metrics                     MetricsRecorder
+	Health                      HealthChecker
+	StatusFallbackWhenUnhealthy bool
 }
